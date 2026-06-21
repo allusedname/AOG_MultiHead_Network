@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+runs/
+checkpoints/
+*.zip
+*.pt
+*.pth
+*.ckpt
+*.csv
+*.png
+.DS_Store
+.ipynb_checkpoints/
+
+# Heavy/generated experiment artifacts
+runs/
+experiments/**/runs/
