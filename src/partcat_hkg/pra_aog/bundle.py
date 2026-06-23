@@ -82,6 +82,12 @@ def build_pra_aog_from_records(
             "motif_count": len(motif_bank.motifs),
             "motif_reuse_ratio": motif_bank.reuse_ratio,
             "motif_shrinkage": float(cfg.motifs.shrinkage),
+            "motif_max_standardized_distance": float(
+                cfg.motifs.max_standardized_distance
+            ),
+            "motif_heterogeneity_penalty": float(
+                cfg.motifs.heterogeneity_penalty
+            ),
         },
     )
 
