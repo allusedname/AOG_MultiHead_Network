@@ -47,6 +47,10 @@ def main() -> None:
     parser.add_argument("--motif-min-references", type=int, default=2)
     parser.add_argument("--motif-min-utility", type=float, default=0.0)
     parser.add_argument("--motif-mdl-penalty", type=float, default=0.01)
+    parser.add_argument(
+        "--motif-max-standardized-distance", type=float, default=2.5
+    )
+    parser.add_argument("--motif-heterogeneity-penalty", type=float, default=0.05)
     parser.add_argument("--motif-shrinkage", type=float, default=0.35)
     args = parser.parse_args()
 
@@ -83,6 +87,10 @@ def main() -> None:
         min_references=int(args.motif_min_references),
         min_utility=float(args.motif_min_utility),
         mdl_penalty=float(args.motif_mdl_penalty),
+        max_standardized_distance=float(
+            args.motif_max_standardized_distance
+        ),
+        heterogeneity_penalty=float(args.motif_heterogeneity_penalty),
         shrinkage=float(args.motif_shrinkage),
     )
     bundle = build_pra_aog_from_records(
@@ -107,7 +115,8 @@ def main() -> None:
     for motif in bundle.motif_bank.motifs[:10]:
         print(
             f"motif={motif.motif_id} parts=({motif.part_i},{motif.part_j}) "
-            f"refs={motif.references} utility={motif.utility:.4f}"
+            f"refs={motif.references} heterogeneity={motif.heterogeneity:.4f} "
+            f"utility={motif.utility:.4f}"
         )
 
 
