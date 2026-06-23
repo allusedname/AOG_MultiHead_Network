@@ -14,10 +14,8 @@ class MotifPursuitConfig:
     """Conservative cross-template motif sharing.
 
     A candidate typed relation motif is retained only when it is reused by
-    several class/template edges and its support-weighted information gain pays
-    for a small description-length cost. This is intentionally narrower than a
-    full graph-induction algorithm: it adds useful sharing without replacing the
-    existing, validated strict-AOG builder.
+    several class/template edges, is geometrically coherent, and its
+    support-weighted information gain pays for a description-length cost.
     """
 
     min_references: int = 2
@@ -25,6 +23,8 @@ class MotifPursuitConfig:
     mdl_penalty: float = 0.01
     shrinkage: float = 0.35
     include_edge_type: bool = True
+    max_standardized_distance: float = 2.5
+    heterogeneity_penalty: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ class SharedMotif:
     var: torch.Tensor
     support: float
     information_gain: float
+    heterogeneity: float
     utility: float
 
     @property
@@ -57,6 +58,7 @@ class SharedMotif:
             "var": self.var.detach().cpu(),
             "support": float(self.support),
             "information_gain": float(self.information_gain),
+            "heterogeneity": float(self.heterogeneity),
             "utility": float(self.utility),
         }
 
@@ -73,8 +75,20 @@ class SharedMotif:
             var=torch.as_tensor(payload["var"]).float(),
             support=float(payload.get("support", 0.0)),
             information_gain=float(payload.get("information_gain", 0.0)),
+            heterogeneity=float(payload.get("heterogeneity", 0.0)),
             utility=float(payload.get("utility", 0.0)),
         )
+
+
+@dataclass(frozen=True)
+class _MotifMember:
+    edge_index: int
+    flipped: bool
+    mean: torch.Tensor
+    var: torch.Tensor
+    support: float
+    information_gain: float
+    weight: float
 
 
 @dataclass(frozen=True)
@@ -122,91 +136,172 @@ class SharedMotifBank:
         if edge_count == 0:
             return cls((), edge_to_motif, edge_flipped)
 
-        groups: dict[tuple[int, int, int], list[tuple[int, bool]]] = {}
-        for edge_idx, row in enumerate(grammar.edges.detach().cpu().tolist()):
-            c, a, si, sj = (int(x) for x in row)
-            pi = int(grammar.slot_part[c, a, si].item())
-            pj = int(grammar.slot_part[c, a, sj].item())
+        groups: dict[tuple[int, int, int], list[_MotifMember]] = {}
+        for edge_index, row in enumerate(grammar.edges.detach().cpu().tolist()):
+            class_id, template_id, slot_i, slot_j = (int(x) for x in row)
+            part_i = int(grammar.slot_part[class_id, template_id, slot_i].item())
+            part_j = int(grammar.slot_part[class_id, template_id, slot_j].item())
             edge_type = (
-                int(grammar.edge_type[edge_idx].item())
+                int(grammar.edge_type[edge_index].item())
                 if cfg.include_edge_type
                 else -1
             )
-            mean = grammar.edge_rel_mean[edge_idx].detach().cpu()
-            flip = _requires_canonical_flip(pi, pj, mean)
-            key = (min(pi, pj), max(pi, pj), edge_type)
-            groups.setdefault(key, []).append((edge_idx, flip))
+            mean = grammar.edge_rel_mean[edge_index].detach().cpu().float()
+            var = (
+                grammar.edge_rel_var[edge_index]
+                .detach()
+                .cpu()
+                .float()
+                .clamp_min(1e-6)
+            )
+            flipped = _requires_canonical_flip(part_i, part_j, mean)
+            if flipped:
+                mean, var = swap_relation_stats(mean, var)
+            support = float(grammar.edge_support[edge_index].item())
+            information_gain = (
+                float(grammar.edge_info_gain[edge_index].item())
+                if getattr(grammar, "edge_info_gain", None) is not None
+                else 0.0
+            )
+            weight = max(1e-4, support * (1.0 + max(information_gain, 0.0)))
+            key = (min(part_i, part_j), max(part_i, part_j), edge_type)
+            groups.setdefault(key, []).append(
+                _MotifMember(
+                    edge_index=edge_index,
+                    flipped=flipped,
+                    mean=mean,
+                    var=var,
+                    support=support,
+                    information_gain=information_gain,
+                    weight=weight,
+                )
+            )
 
         motifs: list[SharedMotif] = []
-        rel_dim = max(1, len(REL_FEATURE_NAMES))
+        relation_dim = max(1, len(REL_FEATURE_NAMES))
         for (part_i, part_j, edge_type), members in sorted(groups.items()):
-            if len(members) < int(cfg.min_references):
-                continue
-            means: list[torch.Tensor] = []
-            variances: list[torch.Tensor] = []
-            weights: list[float] = []
-            supports: list[float] = []
-            infos: list[float] = []
-            for edge_idx, flip in members:
-                mu = grammar.edge_rel_mean[edge_idx].detach().cpu().float()
-                var = (
-                    grammar.edge_rel_var[edge_idx]
-                    .detach()
-                    .cpu()
-                    .float()
-                    .clamp_min(1e-6)
-                )
-                if flip:
-                    mu, var = swap_relation_stats(mu, var)
-                support = float(grammar.edge_support[edge_idx].item())
-                info = (
-                    float(grammar.edge_info_gain[edge_idx].item())
-                    if getattr(grammar, "edge_info_gain", None) is not None
-                    else 0.0
-                )
-                weight = max(1e-4, support * (1.0 + max(info, 0.0)))
-                means.append(mu)
-                variances.append(var)
-                weights.append(weight)
-                supports.append(support)
-                infos.append(info)
-
-            weight_tensor = torch.tensor(weights, dtype=torch.float32)
-            weight_tensor = weight_tensor / weight_tensor.sum().clamp_min(1e-8)
-            mean_stack = torch.stack(means)
-            var_stack = torch.stack(variances)
-            pooled_mean = (weight_tensor[:, None] * mean_stack).sum(0)
-            pooled_var = (
-                weight_tensor[:, None]
-                * (var_stack + (mean_stack - pooled_mean[None]) ** 2)
-            ).sum(0).clamp_min(1e-6)
-            aggregate_gain = float(
-                sum(s * max(i, 0.0) for s, i in zip(supports, infos))
+            clusters = _cluster_members(
+                sorted(members, key=lambda member: member.edge_index),
+                max_distance=float(cfg.max_standardized_distance),
             )
-            utility = aggregate_gain - float(cfg.mdl_penalty) * float(rel_dim)
-            if utility < float(cfg.min_utility):
-                continue
+            for cluster in clusters:
+                if len(cluster) < int(cfg.min_references):
+                    continue
+                pooled_mean, pooled_var = _pool_members(cluster)
+                weights = torch.tensor(
+                    [member.weight for member in cluster], dtype=torch.float32
+                )
+                weights = weights / weights.sum().clamp_min(1e-8)
+                heterogeneity = float(
+                    sum(
+                        float(weight.item())
+                        * _standardized_distance(
+                            member.mean,
+                            member.var,
+                            pooled_mean,
+                            pooled_var,
+                        )
+                        for weight, member in zip(weights, cluster)
+                    )
+                )
+                aggregate_gain = float(
+                    sum(
+                        member.support * max(member.information_gain, 0.0)
+                        for member in cluster
+                    )
+                )
+                utility = (
+                    aggregate_gain
+                    - float(cfg.mdl_penalty) * float(relation_dim)
+                    - float(cfg.heterogeneity_penalty)
+                    * heterogeneity
+                    * float(len(cluster))
+                )
+                if utility < float(cfg.min_utility):
+                    continue
 
-            motif_id = len(motifs)
-            motif = SharedMotif(
-                motif_id=motif_id,
-                part_i=part_i,
-                part_j=part_j,
-                edge_type=edge_type,
-                member_edges=tuple(edge for edge, _ in members),
-                member_flipped=tuple(bool(flip) for _, flip in members),
-                mean=pooled_mean,
-                var=pooled_var,
-                support=float(sum(supports) / max(len(supports), 1)),
-                information_gain=float(sum(infos) / max(len(infos), 1)),
-                utility=float(utility),
-            )
-            motifs.append(motif)
-            for edge_idx, flip in members:
-                edge_to_motif[edge_idx] = motif_id
-                edge_flipped[edge_idx] = bool(flip)
+                motif_id = len(motifs)
+                motif = SharedMotif(
+                    motif_id=motif_id,
+                    part_i=part_i,
+                    part_j=part_j,
+                    edge_type=edge_type,
+                    member_edges=tuple(member.edge_index for member in cluster),
+                    member_flipped=tuple(member.flipped for member in cluster),
+                    mean=pooled_mean,
+                    var=pooled_var,
+                    support=float(
+                        sum(member.support for member in cluster) / len(cluster)
+                    ),
+                    information_gain=float(
+                        sum(member.information_gain for member in cluster)
+                        / len(cluster)
+                    ),
+                    heterogeneity=heterogeneity,
+                    utility=utility,
+                )
+                motifs.append(motif)
+                for member in cluster:
+                    edge_to_motif[member.edge_index] = motif_id
+                    edge_flipped[member.edge_index] = member.flipped
 
         return cls(tuple(motifs), edge_to_motif, edge_flipped)
+
+
+def _cluster_members(
+    members: list[_MotifMember], *, max_distance: float
+) -> list[list[_MotifMember]]:
+    """Greedy deterministic clustering within one typed relation family.
+
+    Typed endpoints alone are not enough to imply semantic reuse. A body-wing
+    relation in two classes is shared only when its standardized geometry is
+    compatible. This prevents motif compression from averaging contradictory
+    view/pose modes.
+    """
+
+    clusters: list[list[_MotifMember]] = []
+    threshold = max(0.0, float(max_distance))
+    for member in members:
+        best_index = -1
+        best_distance = float("inf")
+        for cluster_index, cluster in enumerate(clusters):
+            pooled_mean, pooled_var = _pool_members(cluster)
+            distance = _standardized_distance(
+                member.mean, member.var, pooled_mean, pooled_var
+            )
+            if distance < best_distance:
+                best_distance = distance
+                best_index = cluster_index
+        if best_index >= 0 and best_distance <= threshold:
+            clusters[best_index].append(member)
+        else:
+            clusters.append([member])
+    return clusters
+
+
+def _pool_members(
+    members: list[_MotifMember],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    weights = torch.tensor([member.weight for member in members], dtype=torch.float32)
+    weights = weights / weights.sum().clamp_min(1e-8)
+    mean_stack = torch.stack([member.mean for member in members])
+    var_stack = torch.stack([member.var for member in members])
+    pooled_mean = (weights[:, None] * mean_stack).sum(0)
+    pooled_var = (
+        weights[:, None] * (var_stack + (mean_stack - pooled_mean[None]) ** 2)
+    ).sum(0).clamp_min(1e-6)
+    return pooled_mean, pooled_var
+
+
+def _standardized_distance(
+    mean_a: torch.Tensor,
+    var_a: torch.Tensor,
+    mean_b: torch.Tensor,
+    var_b: torch.Tensor,
+) -> float:
+    denominator = (var_a + var_b).clamp_min(1e-6)
+    value = ((mean_a - mean_b) ** 2 / denominator).mean()
+    return float(torch.nan_to_num(value, nan=1e6, posinf=1e6, neginf=1e6).item())
 
 
 def _requires_canonical_flip(
@@ -267,24 +362,24 @@ def compress_grammar_relations(
     if amount <= 0.0 or not motif_bank.motifs:
         return out
 
-    motif_lookup = {m.motif_id: m for m in motif_bank.motifs}
-    for edge_idx in range(int(out.edges.shape[0])):
-        motif_id = int(motif_bank.edge_to_motif[edge_idx].item())
+    motif_lookup = {motif.motif_id: motif for motif in motif_bank.motifs}
+    for edge_index in range(int(out.edges.shape[0])):
+        motif_id = int(motif_bank.edge_to_motif[edge_index].item())
         if motif_id < 0:
             continue
         motif = motif_lookup[motif_id]
         target_mean = motif.mean.clone()
         target_var = motif.var.clone()
-        if bool(motif_bank.edge_flipped[edge_idx].item()):
+        if bool(motif_bank.edge_flipped[edge_index].item()):
             target_mean, target_var = swap_relation_stats(target_mean, target_var)
-        old_mean = out.edge_rel_mean[edge_idx].float()
-        old_var = out.edge_rel_var[edge_idx].float().clamp_min(1e-6)
+        old_mean = out.edge_rel_mean[edge_index].float()
+        old_var = out.edge_rel_var[edge_index].float().clamp_min(1e-6)
         new_mean = (1.0 - amount) * old_mean + amount * target_mean
         new_var = (
             (1.0 - amount) * old_var
             + amount * target_var
             + amount * (1.0 - amount) * (old_mean - target_mean) ** 2
         ).clamp_min(1e-6)
-        out.edge_rel_mean[edge_idx] = new_mean
-        out.edge_rel_var[edge_idx] = new_var
+        out.edge_rel_mean[edge_index] = new_mean
+        out.edge_rel_var[edge_index] = new_var
     return out
