@@ -12,7 +12,8 @@ from .motifs import (
     SharedMotifBank,
     compress_grammar_relations,
 )
-from .parser import PRAAOGConfig, PRAAOGParser, normalized_parse_scores
+from .parser import PRAAOGConfig, normalized_parse_scores
+from .posterior_parser import PRAAOGParser
 from .readouts import posterior_readouts
 from .topdown import TopDownVerifier, TopDownVerifierConfig
 from .types import (
