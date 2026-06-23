@@ -13,7 +13,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from partcat_hkg.pra_aog import PRAAOGConfig, PRAAOGParser, load_pra_aog
+from partcat_hkg.pra_aog import (
+    PRAAOGConfig,
+    PRAAOGParser,
+    load_pra_aog,
+    save_pra_aog,
+)
 from partcat_hkg.strict_aog.data import (
     StrictAOGTerminalDataset,
     collate_strict_aog,
@@ -139,7 +144,10 @@ def main() -> None:
         )
         return
 
-    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    # Keep motif metadata beside strict-AOG-compatible checkpoints.
+    save_pra_aog(bundle, save_dir / "pra_aog_bundle.pt")
     train_strict_aog(
         model,
         train_loader,
@@ -148,7 +156,7 @@ def main() -> None:
         lr=float(args.lr),
         weight_decay=float(args.weight_decay),
         device=device,
-        save_dir=args.save_dir,
+        save_dir=save_dir,
         enable_edges=not args.disable_edges,
         edge_start_epoch=int(args.edge_start_epoch),
         max_train_batches=int(args.max_train_batches),
