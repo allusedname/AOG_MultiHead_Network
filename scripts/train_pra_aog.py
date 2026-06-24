@@ -35,6 +35,31 @@ def _device(name: str) -> str:
     return name
 
 
+def _load_model_checkpoint(
+    model: torch.nn.Module,
+    path: str,
+    *,
+    strict: bool = False,
+) -> None:
+    payload = torch.load(path, map_location="cpu")
+    state = payload.get("model", payload) if isinstance(payload, dict) else payload
+    if not isinstance(state, dict):
+        raise TypeError(
+            f"Checkpoint {path} does not contain a model state dictionary"
+        )
+    incompatible = model.load_state_dict(state, strict=bool(strict))
+    missing = list(getattr(incompatible, "missing_keys", []))
+    unexpected = list(getattr(incompatible, "unexpected_keys", []))
+    print(
+        f"loaded checkpoint={path} missing_keys={len(missing)} "
+        f"unexpected_keys={len(unexpected)}"
+    )
+    if missing:
+        print("missing:", missing[:20])
+    if unexpected:
+        print("unexpected:", unexpected[:20])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Train the posterior-preserving PRA-AOG over cached terminals."
@@ -48,6 +73,19 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help=(
+            "Optional PRA-AOG checkpoint to load before evaluation or as a "
+            "warm start for training."
+        ),
+    )
+    parser.add_argument(
+        "--strict-checkpoint",
+        action="store_true",
+        help="Require an exact checkpoint/model key match.",
+    )
     parser.add_argument(
         "--assignment",
         choices=[
@@ -131,6 +169,12 @@ def main() -> None:
         replace_logits_with_posterior=bool(args.posterior_logits),
     )
     model = PRAAOGParser(bundle, parser_cfg, pra_cfg).to(device)
+    if args.checkpoint:
+        _load_model_checkpoint(
+            model,
+            args.checkpoint,
+            strict=bool(args.strict_checkpoint),
+        )
 
     if args.eval_only:
         print(
