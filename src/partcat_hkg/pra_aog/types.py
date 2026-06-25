@@ -35,7 +35,10 @@ class SlotParse:
 
     @property
     def is_observed(self) -> bool:
-        return self.visibility is VisibilityState.VISIBLE and self.terminal is not None
+        return (
+            self.visibility is VisibilityState.VISIBLE
+            and self.terminal is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -61,13 +64,22 @@ class ParseHypothesis:
     unconditional_posterior: float
     soft_score: float
     hard_score: float
+    # Backward-compatible field name. This is now the absolute soft/hard score
+    # discrepancy, not a guaranteed non-negative optimization integrality gap.
     integrality_gap: float
+    soft_hard_delta: float
     slots: tuple[SlotParse, ...]
     edges: tuple[EdgeParse, ...]
     diagnostics: dict[str, float] = field(default_factory=dict)
 
+    @property
+    def soft_hard_abs_gap(self) -> float:
+        return float(self.integrality_gap)
+
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
+        out["soft_hard_abs_gap"] = float(self.integrality_gap)
+        out["integrality_gap_is_relaxation_bound"] = False
         for slot in out["slots"]:
             value = slot["visibility"]
             slot["visibility"] = str(
@@ -90,7 +102,7 @@ class ParseForest:
         return {
             "retained_mass": float(self.retained_mass),
             "entropy": float(self.entropy),
-            "hypotheses": [h.to_dict() for h in self.hypotheses],
+            "hypotheses": [hypothesis.to_dict() for hypothesis in self.hypotheses],
         }
 
 
