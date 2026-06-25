@@ -6,11 +6,7 @@ from typing import Any
 
 
 class VisibilityState(str, Enum):
-    """Existence/visibility state of one semantic part instance.
-
-    ``UNRESOLVED`` is deliberately distinct from ``OCCLUDED``. A grammar prior
-    alone is not sufficient evidence that an undetected part is hidden.
-    """
+    """Existence or visibility state of one semantic part instance."""
 
     VISIBLE = "visible"
     OCCLUDED = "occluded"
@@ -64,22 +60,21 @@ class ParseHypothesis:
     unconditional_posterior: float
     soft_score: float
     hard_score: float
-    # Backward-compatible field name. This is now the absolute soft/hard score
-    # discrepancy, not a guaranteed non-negative optimization integrality gap.
     integrality_gap: float
-    soft_hard_delta: float
     slots: tuple[SlotParse, ...]
     edges: tuple[EdgeParse, ...]
     diagnostics: dict[str, float] = field(default_factory=dict)
+    soft_hard_delta: float = 0.0
 
     @property
     def soft_hard_abs_gap(self) -> float:
-        return float(self.integrality_gap)
+        return abs(float(self.soft_score - self.hard_score))
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
-        out["soft_hard_abs_gap"] = float(self.integrality_gap)
-        out["integrality_gap_is_relaxation_bound"] = False
+        out["soft_hard_delta"] = float(self.soft_score - self.hard_score)
+        out["soft_hard_abs_gap"] = self.soft_hard_abs_gap
+        out["integrality_gap_is_bound"] = False
         for slot in out["slots"]:
             value = slot["visibility"]
             slot["visibility"] = str(
@@ -102,7 +97,9 @@ class ParseForest:
         return {
             "retained_mass": float(self.retained_mass),
             "entropy": float(self.entropy),
-            "hypotheses": [hypothesis.to_dict() for hypothesis in self.hypotheses],
+            "hypotheses": [
+                hypothesis.to_dict() for hypothesis in self.hypotheses
+            ],
         }
 
 
