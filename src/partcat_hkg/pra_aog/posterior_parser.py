@@ -5,16 +5,21 @@ from typing import Any
 import torch
 
 from .parser import PRAAOGParser as _StrictBackedPRAAOGParser
+from .runtime import (
+    canonical_box_to_image,
+    prepare_batch_for_parser,
+    preprocess_config_from_metadata,
+)
 
 
 class PRAAOGParser(_StrictBackedPRAAOGParser):
-    """PRA-AOG parser whose parse posterior matches calibrated class logits.
+    """Posterior parser with runtime/build coordinate consistency."""
 
-    The strict-backed implementation computes all energies and hard decodes. This
-    final layer composes the calibrated class posterior with the within-class
-    template posterior, so every posterior readout marginalizes to the same class
-    distribution that the classifier reports.
-    """
+    def __init__(self, grammar_or_bundle, strict_cfg=None, cfg=None) -> None:
+        super().__init__(grammar_or_bundle, strict_cfg, cfg)
+        self.runtime_preprocess_cfg = preprocess_config_from_metadata(
+            getattr(self.bundle, "metadata", {})
+        )
 
     def forward(
         self,
@@ -24,9 +29,14 @@ class PRAAOGParser(_StrictBackedPRAAOGParser):
         return_forest: bool = False,
         return_readouts: bool = False,
     ) -> dict[str, Any]:
-        parser_batch = self._class_agnostic_batch(batch)
-        out = super().forward(
+        prepared = prepare_batch_for_parser(
             batch,
+            part_names=list(self.grammar.part_names),
+            cfg=self.runtime_preprocess_cfg,
+        )
+        parser_batch = self._class_agnostic_batch(prepared)
+        out = super().forward(
+            parser_batch,
             enable_edges=enable_edges,
             return_forest=False,
             return_readouts=False,
@@ -63,9 +73,7 @@ class PRAAOGParser(_StrictBackedPRAAOGParser):
                 "calibrated_class_posterior": class_log_posterior.exp(),
                 "parse_class": top_class,
                 "parse_template": top_template,
-                "parse_log_score": joint.reshape(batch_size, -1).gather(
-                    1, top_flat
-                ),
+                "parse_log_score": joint.reshape(batch_size, -1).gather(1, top_flat),
                 "parse_posterior": top_weight,
                 "parse_unconditional_posterior": top_probability,
                 "parse_retained_mass": retained_mass,
@@ -80,16 +88,34 @@ class PRAAOGParser(_StrictBackedPRAAOGParser):
                 enable_edges=enable_edges,
             )
             out["parse_forest"] = forests
-            out["topdown_queries"] = [
-                [query.to_dict() for query in self.propose_topdown_queries(forest)]
-                for forest in forests
-            ]
+            query_rows = []
+            frames = prepared.get("pra_object_frame")
+            flags = prepared.get("pra_reflected")
+            for batch_index, forest in enumerate(forests):
+                frame = (
+                    frames[batch_index]
+                    if torch.is_tensor(frames)
+                    else (0.0, 0.0, 1.0, 1.0)
+                )
+                reflected = bool(flags[batch_index].item()) if torch.is_tensor(flags) else False
+                row = []
+                for query in self.propose_topdown_queries(forest):
+                    item = query.to_dict()
+                    item["box_xyxy"] = canonical_box_to_image(
+                        query.box_xyxy,
+                        frame,
+                        reflected=reflected,
+                    )
+                    item["coordinate_frame"] = "image_normalized"
+                    row.append(item)
+                query_rows.append(row)
+            out["topdown_queries"] = query_rows
             if return_readouts:
                 from .readouts import posterior_readouts
 
                 out["readouts"] = posterior_readouts(
                     forests,
-                    batch=batch,
+                    batch=prepared,
                     num_parts=len(self.grammar.part_names),
                     num_classes=self.grammar.num_classes,
                 )
