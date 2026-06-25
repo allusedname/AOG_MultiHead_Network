@@ -10,7 +10,7 @@ from .motifs import (
     MotifPursuitConfig,
     SharedMotif,
     SharedMotifBank,
-    compress_grammar_relations,
+    compress_grammar_relations as _compress_grammar_relations,
 )
 from .parser import PRAAOGConfig, normalized_parse_scores
 from .posterior_parser import PRAAOGParser
@@ -36,6 +36,30 @@ from .types import (
     TopDownQuery,
     VisibilityState,
 )
+
+
+def compress_grammar_relations(
+    grammar,
+    motif_bank,
+    *,
+    shrinkage=0.35,
+    adaptive=False,
+    heterogeneity_scale=0.15,
+):
+    """Backward-compatible public wrapper.
+
+    Direct callers retain the old full-shrinkage behavior unless they explicitly
+    request adaptive shrinkage. The v2 bundle builder enables adaptive shrinkage.
+    """
+
+    return _compress_grammar_relations(
+        grammar,
+        motif_bank,
+        shrinkage=shrinkage,
+        adaptive=adaptive,
+        heterogeneity_scale=heterogeneity_scale,
+    )
+
 
 __all__ = [
     "PRAAOGBuildConfig",
