@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from partcat_hkg.data.schema import RoleSchema
 from partcat_hkg.pra_aog import (
+    CoreValidityConfig,
     MotifPursuitConfig,
     ObservationPreprocessConfig,
     PRAAOGBuildConfig,
@@ -26,9 +27,10 @@ from partcat_hkg.strict_aog.terminals import load_terminal_cache
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Build PRA-AOG v2 from cached Stage-1 terminal proposals. "
-            "The builder canonicalizes object geometry, compresses redundant "
-            "branches, and represents repeated parts as set nodes."
+            "Build PRA-AOG v3 from cached Stage-1 terminal proposals. "
+            "This version keeps true object skeletons separate from detector "
+            "visibility/failure states, prunes fragment branches, absorbs "
+            "subset branches, and adds expected core slots."
         )
     )
     parser.add_argument("--cache", required=True)
@@ -66,6 +68,15 @@ def main() -> None:
     )
     parser.add_argument("--count-peak-tau", type=float, default=0.42)
     parser.add_argument("--count-entropy-tau", type=float, default=0.90)
+
+    parser.add_argument("--disable-core-validity", action="store_true")
+    parser.add_argument("--core-min-template-prior", type=float, default=0.015)
+    parser.add_argument("--core-fragment-prior-tau", type=float, default=0.12)
+    parser.add_argument("--core-subset-prior-tau", type=float, default=0.18)
+    parser.add_argument("--core-subset-geometry-tau", type=float, default=0.20)
+    parser.add_argument("--core-min-groups", type=int, default=2)
+    parser.add_argument("--disable-core-slot-promotion", action="store_true")
+    parser.add_argument("--disable-core-anchor-edges", action="store_true")
 
     parser.add_argument("--motif-min-references", type=int, default=2)
     parser.add_argument("--motif-min-classes", type=int, default=2)
@@ -129,6 +140,17 @@ def main() -> None:
         count_entropy_tau=float(args.count_entropy_tau),
         max_edges_per_template=int(args.max_edges_per_template),
     )
+    core_validity = CoreValidityConfig(
+        enabled=not bool(args.disable_core_validity),
+        min_template_prior=float(args.core_min_template_prior),
+        fragment_prior_tau=float(args.core_fragment_prior_tau),
+        subset_absorb_prior_tau=float(args.core_subset_prior_tau),
+        subset_geometry_tau=float(args.core_subset_geometry_tau),
+        min_core_groups=int(args.core_min_groups),
+        promote_core_slots=not bool(args.disable_core_slot_promotion),
+        add_core_anchor_edges=not bool(args.disable_core_anchor_edges),
+        max_promoted_slots_per_template=int(args.max_slots_per_template),
+    )
     motifs = MotifPursuitConfig(
         min_references=int(args.motif_min_references),
         min_classes=int(args.motif_min_classes),
@@ -154,6 +176,7 @@ def main() -> None:
             strict=strict,
             preprocess=preprocess,
             structure=structure,
+            core_validity=core_validity,
             motifs=motifs,
         ),
     )
@@ -164,7 +187,7 @@ def main() -> None:
         int((grammar.template_valid[class_id] > 0.5).sum().item())
         for class_id in range(int(grammar.num_classes))
     ]
-    print(f"saved PRA-AOG v2 bundle to {args.out}")
+    print(f"saved PRA-AOG v3 bundle to {args.out}")
     print(
         f"classes={grammar.num_classes} candidate_templates={grammar.num_templates} "
         f"valid_templates={sum(valid_per_class)} slots={grammar.max_slots} "
@@ -173,6 +196,7 @@ def main() -> None:
     print("valid templates per class:", valid_per_class)
     print("observation preprocessing:", bundle.metadata["observation_preprocess"])
     print("structure refinement:", bundle.metadata["structure_refinement"])
+    print("core validity:", bundle.metadata["core_validity_refinement"])
     print(
         f"shared_motifs={len(bundle.motif_bank.motifs)} "
         f"cross_class={bundle.motif_bank.cross_class_motif_count} "
