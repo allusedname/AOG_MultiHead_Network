@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,10 @@ from partcat_hkg.strict_aog.builder import (
 from partcat_hkg.strict_aog.grammar import StrictAOGGrammar
 from partcat_hkg.strict_aog.terminals import load_terminal_cache
 
+from .core_validity import (
+    CoreValidityConfig,
+    apply_core_validity_refinement,
+)
 from .motifs import (
     MotifPursuitConfig,
     SharedMotifBank,
@@ -38,6 +42,7 @@ class PRAAOGBuildConfig:
     structure: StructureRefinementConfig = field(
         default_factory=StructureRefinementConfig
     )
+    core_validity: CoreValidityConfig = field(default_factory=CoreValidityConfig)
     motifs: MotifPursuitConfig = field(default_factory=MotifPursuitConfig)
 
 
@@ -52,7 +57,7 @@ class PRAAOGBundle:
 
     def to_payload(self) -> dict[str, Any]:
         return {
-            "kind": "pra_aog_v2",
+            "kind": "pra_aog_v3_core_validity",
             "grammar": self.grammar.to_payload(),
             "motif_bank": self.motif_bank.to_payload(),
             "set_bank": self.set_bank.to_payload(),
@@ -63,6 +68,7 @@ class PRAAOGBundle:
     def from_payload(cls, payload: dict[str, Any]) -> "PRAAOGBundle":
         kind = str(payload.get("kind", ""))
         if kind not in {
+            "pra_aog_v3_core_validity",
             "pra_aog_v2",
             "pra_aog_lite_v1",
             "pra_aog",
@@ -76,6 +82,16 @@ class PRAAOGBundle:
             set_bank=SetNodeBank.from_payload(payload.get("set_bank")),
             metadata=dict(payload.get("metadata", {})),
         )
+
+
+def _strip_visual_cache_fields(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Runtime parsing usually receives geometry/tokens but not high-resolution
+    # masks. Build-time grammar induction therefore avoids mask-only decisions
+    # such as keeping a body because it has three connected components.
+    return [
+        {key: value for key, value in record.items() if key != "terminal_mask"}
+        for record in records
+    ]
 
 
 def build_pra_aog_from_records(
@@ -94,8 +110,9 @@ def build_pra_aog_from_records(
             [str(index) for index in range(int(num_parts))],
         )
     )
+    structural_records = _strip_visual_cache_fields(records)
     prepared_records, observation_report = prepare_records_for_grammar(
-        records,
+        structural_records,
         part_names=part_names,
         cfg=cfg.preprocess,
     )
@@ -109,6 +126,11 @@ def build_pra_aog_from_records(
     grammar, structure_report = refine_grammar_structure(
         grammar,
         cfg=cfg.structure,
+        preprocess_cfg=cfg.preprocess,
+    )
+    grammar, core_report = apply_core_validity_refinement(
+        grammar,
+        cfg=cfg.core_validity,
         preprocess_cfg=cfg.preprocess,
     )
     motif_bank = SharedMotifBank.from_grammar(grammar, cfg.motifs)
@@ -128,12 +150,15 @@ def build_pra_aog_from_records(
         motif_bank=motif_bank,
         set_bank=set_bank,
         metadata={
-            "architecture": "part-motif-object-pra-aog-v2",
+            "architecture": "part-motif-object-pra-aog-v3-core-validity",
             "posterior_preserving": True,
             "class_agnostic_terminals_recommended": True,
+            "preprocess_config": asdict(cfg.preprocess),
             "observation_preprocess": observation_report,
             "structure_refinement": structure_report.to_payload(),
             "structure_config": cfg.structure.to_payload(),
+            "core_validity_refinement": core_report.to_payload(),
+            "core_validity_config": cfg.core_validity.to_payload(),
             "motif_count": len(motif_bank.motifs),
             "cross_class_motif_count": motif_bank.cross_class_motif_count,
             "motif_reuse_ratio": motif_bank.reuse_ratio,
