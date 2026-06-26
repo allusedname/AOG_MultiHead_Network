@@ -6,6 +6,12 @@ from .bundle import (
     load_pra_aog,
     save_pra_aog,
 )
+from .core_validity import (
+    CoreSlotRule,
+    CoreValidityConfig,
+    CoreValidityReport,
+    apply_core_validity_refinement,
+)
 from .motifs import (
     MotifPursuitConfig,
     SharedMotif,
@@ -49,7 +55,8 @@ def compress_grammar_relations(
     """Backward-compatible public wrapper.
 
     Direct callers retain the old full-shrinkage behavior unless they explicitly
-    request adaptive shrinkage. The v2 bundle builder enables adaptive shrinkage.
+    request adaptive shrinkage. The v2/v3 bundle builders enable adaptive
+    shrinkage internally.
     """
 
     return _compress_grammar_relations(
@@ -69,6 +76,9 @@ __all__ = [
     "ObservationPreprocessConfig",
     "StructureRefinementConfig",
     "StructureRefinementReport",
+    "CoreSlotRule",
+    "CoreValidityConfig",
+    "CoreValidityReport",
     "MotifPursuitConfig",
     "SharedMotif",
     "SharedMotifBank",
@@ -82,6 +92,7 @@ __all__ = [
     "ParseHypothesis",
     "ParseForest",
     "TopDownQuery",
+    "apply_core_validity_refinement",
     "build_pra_aog_from_cache",
     "build_pra_aog_from_records",
     "compress_grammar_relations",
