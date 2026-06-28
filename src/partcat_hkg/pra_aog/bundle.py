@@ -13,6 +13,7 @@ from partcat_hkg.strict_aog.builder import (
 from partcat_hkg.strict_aog.grammar import StrictAOGGrammar
 from partcat_hkg.strict_aog.terminals import load_terminal_cache
 
+from .hierarchy import SubpartBank, SubpartDiscoveryConfig
 from .motifs import MotifPursuitConfig, SharedMotifBank, compress_grammar_relations
 
 
@@ -20,33 +21,43 @@ from .motifs import MotifPursuitConfig, SharedMotifBank, compress_grammar_relati
 class PRAAOGBuildConfig:
     strict: StrictAOGBuildConfig = field(default_factory=StrictAOGBuildConfig)
     motifs: MotifPursuitConfig = field(default_factory=MotifPursuitConfig)
+    subparts: SubpartDiscoveryConfig = field(default_factory=SubpartDiscoveryConfig)
 
 
 @dataclass
 class PRAAOGBundle:
-    """Serializable Phase-1 Part–Motif–Object PRA-AOG bundle."""
+    """Serializable Part-Motif-Object PRA-AOG bundle.
+
+    ``subpart_bank`` is optional for backwards compatibility. When present it
+    turns the bundle into a first hierarchical AOG: object slots are still the
+    functional parts learned by the strict grammar, but each part also has a
+    learned set of part-internal graphlet/subpart prototypes.
+    """
 
     grammar: StrictAOGGrammar
     motif_bank: SharedMotifBank
     metadata: dict[str, Any] = field(default_factory=dict)
+    subpart_bank: SubpartBank = field(default_factory=SubpartBank.empty)
 
     def to_payload(self) -> dict[str, Any]:
         return {
-            "kind": "pra_aog_lite_v1",
+            "kind": "hierarchical_pra_aog_v1" if self.subpart_bank.count else "pra_aog_lite_v1",
             "grammar": self.grammar.to_payload(),
             "motif_bank": self.motif_bank.to_payload(),
+            "subpart_bank": self.subpart_bank.to_payload(),
             "metadata": dict(self.metadata),
         }
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "PRAAOGBundle":
         kind = str(payload.get("kind", ""))
-        if kind not in {"pra_aog_lite_v1", "pra_aog"}:
+        if kind not in {"pra_aog_lite_v1", "pra_aog", "hierarchical_pra_aog_v1"}:
             raise ValueError(f"Unsupported PRA-AOG bundle kind: {kind!r}")
         return cls(
             grammar=StrictAOGGrammar.from_payload(payload["grammar"]),
             motif_bank=SharedMotifBank.from_payload(payload.get("motif_bank", {})),
             metadata=dict(payload.get("metadata", {})),
+            subpart_bank=SubpartBank.from_payload(payload.get("subpart_bank", {})),
         )
 
 
@@ -72,11 +83,18 @@ def build_pra_aog_from_records(
         motif_bank,
         shrinkage=float(cfg.motifs.shrinkage),
     )
+    part_names = list(getattr(schema, "part_names", getattr(grammar, "part_names", [])))
+    subpart_bank = SubpartBank.from_records(
+        records,
+        part_names=part_names,
+        cfg=cfg.subparts,
+    )
     return PRAAOGBundle(
         grammar=grammar,
         motif_bank=motif_bank,
+        subpart_bank=subpart_bank,
         metadata={
-            "architecture": "part-motif-object-pra-aog",
+            "architecture": "hierarchical-part-motif-object-pra-aog",
             "posterior_preserving": True,
             "class_agnostic_terminals_recommended": True,
             "motif_count": len(motif_bank.motifs),
@@ -88,6 +106,10 @@ def build_pra_aog_from_records(
             "motif_heterogeneity_penalty": float(
                 cfg.motifs.heterogeneity_penalty
             ),
+            "subpart_count": subpart_bank.count,
+            "subpart_grid_size": int(cfg.subparts.grid_size),
+            "subpart_min_support": int(cfg.subparts.min_support),
+            "subpart_terminal_score_boost": float(cfg.subparts.terminal_score_boost),
         },
     )
 

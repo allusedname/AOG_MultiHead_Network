@@ -8,6 +8,15 @@ import torch
 from .types import ParseForest, VisibilityState
 
 
+_OBSERVED_STATES = {VisibilityState.VISIBLE, VisibilityState.PARTIALLY_VISIBLE}
+_PRESENT_STATES = {
+    VisibilityState.VISIBLE,
+    VisibilityState.PARTIALLY_VISIBLE,
+    VisibilityState.OCCLUDED,
+    VisibilityState.TRUNCATED,
+}
+
+
 def posterior_readouts(
     forests: list[ParseForest],
     *,
@@ -18,8 +27,8 @@ def posterior_readouts(
 ) -> dict[str, Any]:
     """Derive proposal tasks from the same top-K structured posterior.
 
-    The function intentionally reports visible and inferred-total counts
-    separately. ``UNRESOLVED`` slots are not silently counted as present.
+    ``PARTIALLY_VISIBLE`` counts as visible support but is reported separately
+    so occlusion/fragmentation robustness can be audited.
     """
 
     batch_size = len(forests)
@@ -29,20 +38,15 @@ def posterior_readouts(
         for hypothesis in forest.hypotheses:
             counts: dict[int, int] = defaultdict(int)
             for slot in hypothesis.slots:
-                if slot.visibility in {
-                    VisibilityState.VISIBLE,
-                    VisibilityState.OCCLUDED,
-                    VisibilityState.TRUNCATED,
-                }:
+                if slot.visibility in _PRESENT_STATES:
                     counts[slot.part_id] += 1
             inferred_max = max(inferred_max, max(counts.values(), default=0))
     count_max = max(1, int(max_count if max_count is not None else inferred_max))
 
     class_posterior = torch.zeros(batch_size, num_classes, device=device)
-    visible_count = torch.zeros(
-        batch_size, num_parts, count_max + 1, device=device
-    )
+    visible_count = torch.zeros(batch_size, num_parts, count_max + 1, device=device)
     total_count = torch.zeros_like(visible_count)
+    partial_visible_prob = torch.zeros(batch_size, num_parts, device=device)
     unresolved_prob = torch.zeros(batch_size, num_parts, device=device)
     expected_integrality_gap = torch.zeros(batch_size, device=device)
     expected_hard_score = torch.zeros(batch_size, device=device)
@@ -75,9 +79,7 @@ def posterior_readouts(
             expected_integrality_gap[batch_index] += weight * float(
                 hypothesis.integrality_gap
             )
-            expected_hard_score[batch_index] += weight * float(
-                hypothesis.hard_score
-            )
+            expected_hard_score[batch_index] += weight * float(hypothesis.hard_score)
 
             visible_by_part: dict[int, int] = defaultdict(int)
             total_by_part: dict[int, int] = defaultdict(int)
@@ -85,9 +87,11 @@ def posterior_readouts(
             for slot in hypothesis.slots:
                 if not (0 <= slot.part_id < num_parts):
                     continue
-                if slot.visibility is VisibilityState.VISIBLE:
+                if slot.visibility in _OBSERVED_STATES:
                     visible_by_part[slot.part_id] += 1
                     total_by_part[slot.part_id] += 1
+                    if slot.visibility is VisibilityState.PARTIALLY_VISIBLE:
+                        partial_visible_prob[batch_index, slot.part_id] += weight
                     if semantic_masks is not None and slot.terminal is not None:
                         mask = terminal_masks[batch_index, slot.terminal].to(
                             semantic_masks.device
@@ -115,10 +119,7 @@ def posterior_readouts(
                             ("cx", "cy", "w", "h"), slot.observed_geom[:4]
                         ):
                             accumulator[name] += weight * float(value)
-                elif slot.visibility in {
-                    VisibilityState.OCCLUDED,
-                    VisibilityState.TRUNCATED,
-                }:
+                elif slot.visibility in {VisibilityState.OCCLUDED, VisibilityState.TRUNCATED}:
                     total_by_part[slot.part_id] += 1
                 elif slot.visibility is VisibilityState.UNRESOLVED:
                     unresolved_prob[batch_index, slot.part_id] += weight
@@ -147,22 +148,18 @@ def posterior_readouts(
                 if edge.status == "instantiated":
                     accumulator["probability"] += weight
                     if edge.relation_score is not None:
-                        accumulator["weighted_score"] += weight * float(
-                            edge.relation_score
-                        )
+                        accumulator["weighted_score"] += weight * float(edge.relation_score)
                         accumulator["score_weight"] += weight
 
         if map_parse is not None:
             for slot in map_parse.slots:
-                if (
-                    slot.visibility is VisibilityState.VISIBLE
-                    and slot.terminal is not None
-                ):
+                if slot.visibility in _OBSERVED_STATES and slot.terminal is not None:
                     instance_rows.append(
                         {
                             "part_id": slot.part_id,
                             "part": slot.part,
                             "slot": slot.slot,
+                            "visibility": slot.visibility.value,
                             "terminal": slot.terminal,
                             "score": slot.terminal_score,
                             "geom": slot.observed_geom,
@@ -205,19 +202,15 @@ def posterior_readouts(
             )
         relation_posteriors.append(edge_rows)
 
-    # Numerical cleanup for top-K forests with tiny retained mass.
-    class_posterior = class_posterior / class_posterior.sum(
-        -1, keepdim=True
-    ).clamp_min(1e-12)
-    visible_count = visible_count / visible_count.sum(-1, keepdim=True).clamp_min(
-        1e-12
-    )
+    class_posterior = class_posterior / class_posterior.sum(-1, keepdim=True).clamp_min(1e-12)
+    visible_count = visible_count / visible_count.sum(-1, keepdim=True).clamp_min(1e-12)
     total_count = total_count / total_count.sum(-1, keepdim=True).clamp_min(1e-12)
 
     out: dict[str, Any] = {
         "class_posterior_topk": class_posterior,
         "visible_count_posterior": visible_count,
         "total_count_posterior": total_count,
+        "partial_visible_part_probability": partial_visible_prob.clamp(0, 1),
         "unresolved_part_probability": unresolved_prob.clamp(0, 1),
         "expected_integrality_gap": expected_integrality_gap,
         "expected_hard_parse_score": expected_hard_score,

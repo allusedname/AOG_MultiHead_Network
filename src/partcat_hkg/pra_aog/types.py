@@ -8,11 +8,14 @@ from typing import Any
 class VisibilityState(str, Enum):
     """Existence/visibility state of one semantic part instance.
 
-    ``UNRESOLVED`` is deliberately distinct from ``OCCLUDED``. A grammar prior
-    alone is not sufficient evidence that an undetected part is hidden.
+    ``PARTIALLY_VISIBLE`` is used by hierarchical PRA-AOG when whole-part
+    evidence is weak but reusable subpart/graphlet evidence supports the part.
+    ``UNRESOLVED`` remains distinct from ``OCCLUDED``: a grammar prior alone is
+    not evidence that an undetected part is hidden.
     """
 
     VISIBLE = "visible"
+    PARTIALLY_VISIBLE = "partially_visible"
     OCCLUDED = "occluded"
     TRUNCATED = "truncated"
     ABSENT = "absent"
@@ -35,7 +38,11 @@ class SlotParse:
 
     @property
     def is_observed(self) -> bool:
-        return self.visibility is VisibilityState.VISIBLE and self.terminal is not None
+        return (
+            self.visibility
+            in {VisibilityState.VISIBLE, VisibilityState.PARTIALLY_VISIBLE}
+            and self.terminal is not None
+        )
 
 
 @dataclass(frozen=True)

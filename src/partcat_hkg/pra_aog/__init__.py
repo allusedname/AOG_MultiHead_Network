@@ -6,6 +6,8 @@ from .bundle import (
     load_pra_aog,
     save_pra_aog,
 )
+from .hierarchical_parser import HierarchicalPRAAOGConfig, HierarchicalPRAAOGParser
+from .hierarchy import SubpartBank, SubpartDiscoveryConfig, SubpartPrototype
 from .motifs import (
     MotifPursuitConfig,
     SharedMotif,
@@ -30,6 +32,11 @@ __all__ = [
     "PRAAOGBundle",
     "PRAAOGConfig",
     "PRAAOGParser",
+    "HierarchicalPRAAOGConfig",
+    "HierarchicalPRAAOGParser",
+    "SubpartBank",
+    "SubpartDiscoveryConfig",
+    "SubpartPrototype",
     "MotifPursuitConfig",
     "SharedMotif",
     "SharedMotifBank",
