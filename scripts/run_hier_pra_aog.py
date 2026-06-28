@@ -1,9 +1,169 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
+import argparse
+from pathlib import Path
+import sys
+
+import torch
+from torch.utils.data import DataLoader
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from partcat_hkg.pra_aog import (
+    HierarchicalPRAAOGConfig,
+    HierarchicalPRAAOGParser,
+    PRAAOGConfig,
+    load_pra_aog,
+    save_pra_aog,
+)
+from partcat_hkg.strict_aog.data import StrictAOGTerminalDataset, collate_strict_aog
+from partcat_hkg.strict_aog.parser import ParserConfig
+from partcat_hkg.strict_aog.trainer import evaluate_strict_aog, train_strict_aog
+
+
+def _device(name: str) -> str:
+    if name == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if name.startswith("cuda") and not torch.cuda.is_available():
+        return "cpu"
+    return name
+
+
+def _load_model_checkpoint(model: torch.nn.Module, path: str, *, strict: bool = False) -> None:
+    payload = torch.load(path, map_location="cpu")
+    state = payload.get("model", payload) if isinstance(payload, dict) else payload
+    if not isinstance(state, dict):
+        raise TypeError(f"Checkpoint {path} does not contain a model state dictionary")
+    incompatible = model.load_state_dict(state, strict=bool(strict))
+    print(
+        f"loaded checkpoint={path} missing={len(incompatible.missing_keys)} "
+        f"unexpected={len(incompatible.unexpected_keys)}"
+    )
+
 
 def main() -> None:
-    print("hierarchical PRA-AOG runner")
+    parser = argparse.ArgumentParser(
+        description="Run hierarchical PRA-AOG with subpart evidence."
+    )
+    parser.add_argument("--bundle", required=True)
+    parser.add_argument("--train-cache", required=True)
+    parser.add_argument("--val-cache", required=True)
+    parser.add_argument("--save-dir", default="runs/hier_pra_aog")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--checkpoint", default="")
+    parser.add_argument("--strict-checkpoint", action="store_true")
+    parser.add_argument(
+        "--assignment",
+        choices=["gpu_mf", "edge_greedy", "beam", "greedy", "sinkhorn", "independent"],
+        default="gpu_mf",
+    )
+    parser.add_argument("--relation-weight", type=float, default=1.35)
+    parser.add_argument("--count-weight", type=float, default=0.10)
+    parser.add_argument("--missing-weight", type=float, default=0.30)
+    parser.add_argument("--edge-start-epoch", type=int, default=1)
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--posterior-tau", type=float, default=0.75)
+    parser.add_argument("--posterior-logits", action="store_true")
+    parser.add_argument("--subpart-score-weight", type=float, default=0.35)
+    parser.add_argument("--partial-visibility-tau", type=float, default=0.18)
+    parser.add_argument("--partial-whole-score-tau", type=float, default=0.48)
+    parser.add_argument("--use-class-role-evidence", action="store_true")
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--preload-cache", action="store_true")
+    parser.add_argument("--include-visual", action="store_true")
+    parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--disable-edges", action="store_true")
+    parser.add_argument("--max-train-batches", type=int, default=0)
+    parser.add_argument("--max-val-batches", type=int, default=0)
+    args = parser.parse_args()
+
+    device = torch.device(_device(args.device))
+    train_dataset = StrictAOGTerminalDataset(
+        args.train_cache,
+        preload=bool(args.preload_cache),
+        include_visual=bool(args.include_visual),
+    )
+    val_dataset = StrictAOGTerminalDataset(
+        args.val_cache,
+        preload=bool(args.preload_cache),
+        include_visual=bool(args.include_visual),
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=int(args.batch_size),
+        shuffle=True,
+        num_workers=max(0, int(args.num_workers)),
+        collate_fn=collate_strict_aog,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=int(args.batch_size),
+        shuffle=False,
+        num_workers=max(0, int(args.num_workers)),
+        collate_fn=collate_strict_aog,
+    )
+
+    bundle = load_pra_aog(args.bundle)
+    parser_cfg = ParserConfig(
+        assignment=str(args.assignment),
+        relation_weight=float(args.relation_weight),
+        count_weight=float(args.count_weight),
+        missing_weight=float(args.missing_weight),
+        role_overlap_weight=(0.40 if args.use_class_role_evidence else 0.0),
+        template_tau=float(args.posterior_tau),
+    )
+    pra_cfg = PRAAOGConfig(
+        top_k=int(args.top_k),
+        posterior_tau=float(args.posterior_tau),
+        use_class_role_evidence=bool(args.use_class_role_evidence),
+        replace_logits_with_posterior=bool(args.posterior_logits),
+    )
+    hier_cfg = HierarchicalPRAAOGConfig(
+        subpart_score_weight=float(args.subpart_score_weight),
+        partial_visibility_tau=float(args.partial_visibility_tau),
+        partial_whole_score_tau=float(args.partial_whole_score_tau),
+    )
+    model = HierarchicalPRAAOGParser(bundle, parser_cfg, pra_cfg, hier_cfg).to(device)
+    if args.checkpoint:
+        _load_model_checkpoint(model, args.checkpoint, strict=bool(args.strict_checkpoint))
+
+    if args.eval_only:
+        print(
+            evaluate_strict_aog(
+                model,
+                val_loader,
+                device=device,
+                enable_edges=not args.disable_edges,
+                max_batches=int(args.max_val_batches),
+            )
+        )
+        return
+
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_pra_aog(bundle, save_dir / "hier_pra_aog_bundle.pt")
+    train_strict_aog(
+        model,
+        train_loader,
+        val_loader,
+        epochs=int(args.epochs),
+        lr=float(args.lr),
+        weight_decay=float(args.weight_decay),
+        device=device,
+        save_dir=save_dir,
+        enable_edges=not args.disable_edges,
+        edge_start_epoch=int(args.edge_start_epoch),
+        max_train_batches=int(args.max_train_batches),
+        max_val_batches=int(args.max_val_batches),
+    )
 
 
 if __name__ == "__main__":
