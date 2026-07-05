@@ -1,0 +1,14 @@
+\documentclass{article}
+\usepackage{amsmath}
+\title{Complete ABG-HKG-AOG v7 Methodology}
+\begin{document}
+\maketitle
+\section{Goal}
+Complete v7 is a native recurrent attributed And-Or graph. Stage 1 provides image evidence, beta parsing builds parse forests, and gamma sends top-down queries back to Stage 1.
+\section{Hierarchy}
+\[ Scene \to Object \to Class \to Pose \to FunctionalPart \to PartTemplate \to Subpart/Port/Terminal. \]
+\section{Score}
+\[ S(pg|I)=S_\alpha+S_{rule}+S_{part}+S_{rel}+S_{port}+S_{vis}+S_{scene}-C(pg). \]
+\section{Completion Criteria}
+Stage 1 must answer ROI queries from image features. Part templates must be native OR branches. Parse forests must record part-template, subpart, and port posterior. Relations must include explicit geometry and learned port compatibility. Scene parsing must assign terminals to object instances jointly. Structure learning must create grammar nodes and compact the graph.
+\end{document}
