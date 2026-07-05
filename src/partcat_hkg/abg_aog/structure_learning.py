@@ -61,10 +61,7 @@ class BlockPursuitBank:
         cols = []
         for block in self.blocks:
             ids = torch.tensor(block.feature_ids, device=response.device, dtype=torch.long)
-            if ids.numel() == 0:
-                cols.append(torch.zeros(response.shape[0], device=response.device))
-            else:
-                cols.append(response[:, ids].mean(-1) * float(block.branch_prior))
+            cols.append(torch.zeros(response.shape[0], device=response.device) if ids.numel() == 0 else response[:, ids].mean(-1) * float(block.branch_prior))
         return torch.stack(cols, dim=-1)
 
     def to_payload(self) -> dict[str, Any]:
@@ -89,12 +86,7 @@ class BlockPursuitBank:
 
 
 class EMBlockPursuitLearner:
-    """Small, runnable EM-style block-pursuit learner on response matrices.
-
-    It implements the practical subset needed by this repository: select repeated
-    high-response feature blocks, enforce a local mutual-exclusion heuristic, rank
-    by penalized information gain, and stop when marginal gain is too small.
-    """
+    """Runnable EM-style block-pursuit learner on response matrices."""
 
     def __init__(self, cfg: BlockPursuitConfig | None = None) -> None:
         self.cfg = cfg or BlockPursuitConfig()
@@ -103,18 +95,16 @@ class EMBlockPursuitLearner:
         if response.ndim != 2:
             raise ValueError("response must be [N, D]")
         R = response.detach().float().clamp(0, 1).cpu()
-        n, d = R.shape
+        n, _ = R.shape
         used_features: set[int] = set()
         blocks: list[BlockPrototype] = []
         residual = R.clone()
-        for block_id in range(int(self.cfg.max_blocks)):
+        for _ in range(int(self.cfg.max_blocks)):
             means = residual.mean(0)
             order = torch.argsort(means, descending=True).tolist()
             chosen: list[int] = []
             for j in order:
-                if j in used_features:
-                    continue
-                if float(means[j].item()) < float(self.cfg.feature_tau):
+                if j in used_features or float(means[j].item()) < float(self.cfg.feature_tau):
                     continue
                 chosen.append(int(j))
                 if len(chosen) >= int(self.cfg.max_features_per_block):
@@ -125,20 +115,20 @@ class EMBlockPursuitLearner:
             rows = torch.nonzero(block_score >= float(self.cfg.activation_tau), as_tuple=False).flatten().tolist()
             if len(rows) < int(self.cfg.min_rows_per_block):
                 break
-            mean_resp = float(block_score[rows].mean().item()) if rows else 0.0
+            mean_resp = float(block_score[rows].mean().item())
             gain = mean_resp * len(rows) / max(float(n), 1.0) - float(self.cfg.sparsity_penalty) * len(chosen)
             if gain < float(self.cfg.stop_gain):
                 break
             prior = len(rows) / max(float(n), 1.0)
-            blocks.append(BlockPrototype(block_id=len(blocks), feature_ids=tuple(chosen), support_rows=tuple(int(r) for r in rows), gain=float(gain), mean_response=mean_resp, branch_prior=float(prior)))
+            blocks.append(BlockPrototype(len(blocks), tuple(chosen), tuple(int(r) for r in rows), float(gain), mean_resp, float(prior)))
             used_features.update(chosen)
-            # Local mutual exclusion: discount rows/features that this block already explains.
-            residual[rows][:, chosen] = residual[rows][:, chosen] * float(1.0 - self.cfg.mutual_exclusion_tau)
+            row_idx = torch.tensor(rows, dtype=torch.long)
+            col_idx = torch.tensor(chosen, dtype=torch.long)
+            residual[row_idx[:, None], col_idx[None, :]] *= float(1.0 - self.cfg.mutual_exclusion_tau)
         return BlockPursuitBank(tuple(blocks), self.cfg, tuple(str(x) for x in feature_names))
 
 
 def response_from_terminal_records(records: list[dict[str, Any]], *, num_parts: int | None = None) -> tuple[torch.Tensor, list[str]]:
-    """Convert cached terminal records to an image-by-part response matrix."""
     if not records:
         return torch.zeros(0, 0), []
     if num_parts is None:
@@ -185,9 +175,6 @@ class SemiSupervisedExpander:
         learner = EMBlockPursuitLearner(BlockPursuitConfig(**asdict(bank.cfg)))
         learner.cfg.max_blocks = min(int(self.cfg.max_new_blocks), int(bank.cfg.max_blocks))
         new_bank = learner.fit(hard, feature_names=bank.feature_names)
-        if new_bank.count <= 0:
-            return bank
-        # Keep only structurally consistent blocks with enough average activation.
         keep = [b for b in new_bank.blocks if b.mean_response >= float(self.cfg.structural_consistency_tau)]
         merged = list(bank.blocks)
         for b in keep:
