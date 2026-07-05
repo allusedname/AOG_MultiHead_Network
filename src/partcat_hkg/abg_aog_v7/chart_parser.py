@@ -22,11 +22,7 @@ class _State:
 
 
 class NativeChartParserV7:
-    """Bounded chart parser for native v7 AOGs.
-
-    This parser now records part-template branch posterior and uses calibrated,
-    support-gated relation factors rather than adding arbitrary relation scores.
-    """
+    """Bounded chart parser for native v7 AOGs."""
 
     def __init__(self, grammar: NativeGrammarV7, *, cfg: V7NativeConfig | None = None, enable_relations: bool = True) -> None:
         self.grammar = grammar
@@ -96,6 +92,24 @@ class NativeChartParserV7:
     def _copy_slot(s: SlotAssignmentV7) -> SlotAssignmentV7:
         return SlotAssignmentV7(slot_id=s.slot_id, part_id=s.part_id, terminal_id=s.terminal_id, visibility=s.visibility, score=s.score, part_template_id=s.part_template_id, part_template_posterior=s.part_template_posterior, subpart_assignments=list(s.subpart_assignments), port_assignments=list(s.port_assignments))
 
+    @staticmethod
+    def _box_geom(box: tuple[float, float, float, float]) -> torch.Tensor:
+        x0, y0, x1, y1 = [float(x) for x in box]
+        return torch.tensor([0.5 * (x0 + x1), 0.5 * (y0 + y1), max(x1 - x0, 1e-4), max(y1 - y0, 1e-4)], dtype=torch.float32)
+
+    def _template_geom_bonus(self, node: Any, terminal: TerminalPacketV7) -> float:
+        mean = node.attributes.get("template_geom_mean")
+        var = node.attributes.get("template_geom_var")
+        if mean is None:
+            return 0.0
+        obs = self._box_geom(terminal.visible_box_xyxy)
+        mu = torch.as_tensor(mean, dtype=torch.float32)
+        vv = torch.as_tensor(var if var is not None else [0.08, 0.08, 0.08, 0.08], dtype=torch.float32).clamp_min(1e-3)
+        if mu.numel() != obs.numel():
+            return 0.0
+        mahal = (((obs - mu) ** 2) / vv).mean()
+        return float(0.25 * torch.exp(-0.5 * torch.clamp(mahal, max=4.0)).item())
+
     def _parse_terminal(self, node_id: int, terminals: list[TerminalPacketV7]) -> list[_State]:
         node = self.grammar.nodes[node_id]
         part_id = node.attributes.get("functional_part_id")
@@ -115,8 +129,9 @@ class NativeChartParserV7:
                 subparts.append(int(subpart_id))
             elif t.subpart_id is not None:
                 subparts.append(int(t.subpart_id))
-            slot = SlotAssignmentV7(slot_id=slot_id, part_id=int(t.functional_part_id), terminal_id=int(t.terminal_id), visibility=vis, score=float(t.visible_score), part_template_id=int(part_template_id) if part_template_id is not None else None, part_template_posterior=None, subpart_assignments=subparts, port_assignments=[(p.port_type, p.port_id) for p in t.ports])
-            states.append(_State(score=float(t.visible_score) - float(t.uncertainty), terminal_ids=(int(t.terminal_id),), slots=[slot]))
+            bonus = self._template_geom_bonus(node, t)
+            slot = SlotAssignmentV7(slot_id=slot_id, part_id=int(t.functional_part_id), terminal_id=int(t.terminal_id), visibility=vis, score=float(t.visible_score) + bonus, part_template_id=int(part_template_id) if part_template_id is not None else None, part_template_posterior=None, subpart_assignments=subparts, port_assignments=[(p.port_type, p.port_id) for p in t.ports])
+            states.append(_State(score=float(t.visible_score) + bonus - float(t.uncertainty), terminal_ids=(int(t.terminal_id),), slots=[slot]))
         if allow_absent or not states:
             target_part = int(part_id) if part_id is not None else -1
             vis = VisibilityStateV7.ABSENT if allow_absent else VisibilityStateV7.UNRESOLVED
