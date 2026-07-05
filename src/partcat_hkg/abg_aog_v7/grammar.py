@@ -10,13 +10,6 @@ from .types import GrammarNodeV7, NodeKindV7, RelationFactorV7, RuleKindV7, Rule
 
 
 class NativeGrammarV7:
-    """Native attributed AOG grammar for ABG-HKG-AOG v7.
-
-    The grammar stores OR/AND/TERMINAL nodes, production rules, and horizontal
-    relation factors.  It is intentionally independent from the v6 strict grammar
-    so that v7 can represent FunctionalPart OR -> PartTemplate AND branches.
-    """
-
     def __init__(self, *, root_id: int = 0, class_names: list[str] | None = None, part_names: list[str] | None = None) -> None:
         self.root_id = int(root_id)
         self.nodes: dict[int, GrammarNodeV7] = {}
@@ -31,8 +24,7 @@ class NativeGrammarV7:
     def add_node(self, kind: NodeKindV7 | str, semantic_type: str, name: str, *, attributes: dict[str, Any] | None = None, priors: dict[str, float] | None = None, complexity_cost: float = 0.0) -> int:
         node_id = self._next_node
         self._next_node += 1
-        node = GrammarNodeV7(node_id=node_id, kind=NodeKindV7(kind), semantic_type=semantic_type, name=name, attributes=dict(attributes or {}), priors=dict(priors or {}), complexity_cost=float(complexity_cost))
-        self.nodes[node_id] = node
+        self.nodes[node_id] = GrammarNodeV7(node_id=node_id, kind=NodeKindV7(kind), semantic_type=semantic_type, name=name, attributes=dict(attributes or {}), priors=dict(priors or {}), complexity_cost=float(complexity_cost))
         return node_id
 
     def add_rule(self, parent_node_id: int, child_node_ids: list[int], *, kind: RuleKindV7 | str, branch_prior: float = 1.0, required_children: list[int] | None = None, optional_children: list[int] | None = None, relation_factors: list[int] | None = None, geometric_constraints: dict[str, Any] | None = None, complexity_cost: float = 0.0) -> int:
@@ -49,12 +41,10 @@ class NativeGrammarV7:
         self.nodes[parent_node_id].rules.append(rule_id)
         return rule_id
 
-    def add_relation(self, source_node_id: int, target_node_id: int, relation_type: str, *, mean: tuple[float, ...] = (), var: tuple[float, ...] = (), weight: float = 1.0, port_source_type: str | None = None, port_target_type: str | None = None) -> int:
-        if source_node_id not in self.nodes or target_node_id not in self.nodes:
-            raise KeyError("relation endpoints must be known nodes")
+    def add_relation(self, source_node_id: int, target_node_id: int, relation_type: str, *, mean: tuple[float, ...] = (), var: tuple[float, ...] = (), weight: float = 1.0, port_source_type: str | None = None, port_target_type: str | None = None, source_part_id: int | None = None, target_part_id: int | None = None, support: int = 0, reliability: float = 0.0, enabled: bool = True) -> int:
         relation_id = self._next_relation
         self._next_relation += 1
-        self.relations[relation_id] = RelationFactorV7(relation_id=relation_id, source_node_id=source_node_id, target_node_id=target_node_id, relation_type=relation_type, mean=tuple(float(x) for x in mean), var=tuple(float(x) for x in var), weight=float(weight), port_source_type=port_source_type, port_target_type=port_target_type)
+        self.relations[relation_id] = RelationFactorV7(relation_id=relation_id, source_node_id=source_node_id, target_node_id=target_node_id, relation_type=relation_type, mean=tuple(float(x) for x in mean), var=tuple(float(x) for x in var), weight=float(weight), port_source_type=port_source_type, port_target_type=port_target_type, source_part_id=source_part_id, target_part_id=target_part_id, support=int(support), reliability=float(reliability), enabled=bool(enabled))
         return relation_id
 
     def validate(self) -> None:
@@ -66,33 +56,19 @@ class NativeGrammarV7:
             for child in rule.child_node_ids:
                 if child not in self.nodes:
                     raise ValueError(f"rule {rule.rule_id} has missing child {child}")
-        for rel in self.relations.values():
-            if rel.source_node_id not in self.nodes or rel.target_node_id not in self.nodes:
-                raise ValueError(f"relation {rel.relation_id} has missing endpoint")
 
     def to_payload(self) -> dict[str, Any]:
-        return {
-            "kind": "native_abg_hkg_aog_v7_grammar",
-            "root_id": self.root_id,
-            "class_names": list(self.class_names),
-            "part_names": list(self.part_names),
-            "nodes": {int(k): v.to_dict() for k, v in self.nodes.items()},
-            "rules": {int(k): v.to_dict() for k, v in self.rules.items()},
-            "relations": {int(k): v.to_dict() for k, v in self.relations.items()},
-            "next": {"node": self._next_node, "rule": self._next_rule, "relation": self._next_relation},
-        }
+        return {"kind": "native_abg_hkg_aog_v7_grammar", "root_id": self.root_id, "class_names": list(self.class_names), "part_names": list(self.part_names), "nodes": {int(k): v.to_dict() for k, v in self.nodes.items()}, "rules": {int(k): v.to_dict() for k, v in self.rules.items()}, "relations": {int(k): v.to_dict() for k, v in self.relations.items()}, "next": {"node": self._next_node, "rule": self._next_rule, "relation": self._next_relation}}
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "NativeGrammarV7":
         g = cls(root_id=int(payload.get("root_id", 0)), class_names=list(payload.get("class_names", [])), part_names=list(payload.get("part_names", [])))
         for key, nd in payload.get("nodes", {}).items():
-            node = GrammarNodeV7(node_id=int(nd["node_id"]), kind=NodeKindV7(nd["kind"]), semantic_type=str(nd["semantic_type"]), name=str(nd["name"]), children=list(nd.get("children", [])), rules=list(nd.get("rules", [])), attributes=dict(nd.get("attributes", {})), priors=dict(nd.get("priors", {})), complexity_cost=float(nd.get("complexity_cost", 0.0)))
-            g.nodes[int(key)] = node
+            g.nodes[int(key)] = GrammarNodeV7(node_id=int(nd["node_id"]), kind=NodeKindV7(nd["kind"]), semantic_type=str(nd["semantic_type"]), name=str(nd["name"]), children=list(nd.get("children", [])), rules=list(nd.get("rules", [])), attributes=dict(nd.get("attributes", {})), priors=dict(nd.get("priors", {})), complexity_cost=float(nd.get("complexity_cost", 0.0)))
         for key, rd in payload.get("rules", {}).items():
-            rule = RuleV7(rule_id=int(rd["rule_id"]), parent_node_id=int(rd["parent_node_id"]), child_node_ids=list(rd.get("child_node_ids", [])), kind=RuleKindV7(rd["kind"]), branch_prior=float(rd.get("branch_prior", 1.0)), required_children=list(rd.get("required_children", [])), optional_children=list(rd.get("optional_children", [])), relation_factors=list(rd.get("relation_factors", [])), geometric_constraints=dict(rd.get("geometric_constraints", {})), complexity_cost=float(rd.get("complexity_cost", 0.0)))
-            g.rules[int(key)] = rule
+            g.rules[int(key)] = RuleV7(rule_id=int(rd["rule_id"]), parent_node_id=int(rd["parent_node_id"]), child_node_ids=list(rd.get("child_node_ids", [])), kind=RuleKindV7(rd["kind"]), branch_prior=float(rd.get("branch_prior", 1.0)), required_children=list(rd.get("required_children", [])), optional_children=list(rd.get("optional_children", [])), relation_factors=list(rd.get("relation_factors", [])), geometric_constraints=dict(rd.get("geometric_constraints", {})), complexity_cost=float(rd.get("complexity_cost", 0.0)))
         for key, r in payload.get("relations", {}).items():
-            g.relations[int(key)] = RelationFactorV7(relation_id=int(r["relation_id"]), source_node_id=int(r["source_node_id"]), target_node_id=int(r["target_node_id"]), relation_type=str(r["relation_type"]), mean=tuple(r.get("mean", ())), var=tuple(r.get("var", ())), weight=float(r.get("weight", 1.0)), port_source_type=r.get("port_source_type"), port_target_type=r.get("port_target_type"))
+            g.relations[int(key)] = RelationFactorV7(relation_id=int(r["relation_id"]), source_node_id=int(r["source_node_id"]), target_node_id=int(r["target_node_id"]), relation_type=str(r["relation_type"]), mean=tuple(r.get("mean", ())), var=tuple(r.get("var", ())), weight=float(r.get("weight", 1.0)), port_source_type=r.get("port_source_type"), port_target_type=r.get("port_target_type"), source_part_id=r.get("source_part_id"), target_part_id=r.get("target_part_id"), support=int(r.get("support", 0)), reliability=float(r.get("reliability", 0.0)), enabled=bool(r.get("enabled", True)))
         nxt = payload.get("next", {})
         g._next_node = int(nxt.get("node", max(g.nodes.keys(), default=-1) + 1))
         g._next_rule = int(nxt.get("rule", max(g.rules.keys(), default=-1) + 1))
