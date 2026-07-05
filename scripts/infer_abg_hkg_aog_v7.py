@@ -1,2 +1,2 @@
 #!/usr/bin/env python
-print('ABG-HKG-AOG v7 inference script placeholder')
+__import__('partcat_hkg.abg_aog.infer_cli', fromlist=['main']).main()
