@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from .queryable_stage1 import CachedRequeryer
-from .topdown import V7TopDownRenderer
+from .topdown import V7TopDownConfig, V7TopDownRenderer
 from .types import V7AOGConfig, V7IterationStats
 
 
@@ -15,7 +15,7 @@ class ABGHKGAOGParser(nn.Module):
         super().__init__()
         self.base_parser = base_parser
         self.v7_cfg = cfg or V7AOGConfig()
-        self.renderer = V7TopDownRenderer()
+        self.renderer = V7TopDownRenderer(V7TopDownConfig(max_queries=int(self.v7_cfg.max_queries_per_round), query_min_posterior=float(self.v7_cfg.query_min_posterior)))
         self.requeryer = CachedRequeryer()
 
     @property
