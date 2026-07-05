@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from partcat_hkg.abg_aog import EMBlockPursuitLearner, port_pair_score, response_from_terminal_records
+from partcat_hkg.abg_aog import BlockPursuitConfig, EMBlockPursuitLearner, port_pair_score, response_from_terminal_records
 
 
 def test_port_pair_score_shapes_and_no_self_edges():
@@ -33,7 +33,8 @@ def test_block_pursuit_learns_repeated_blocks():
         [0.1, 0.0, 0.9, 0.8],
         [0.2, 0.1, 0.8, 0.9],
     ])
-    bank = EMBlockPursuitLearner().fit(R, feature_names=["a", "b", "c", "d"])
+    cfg = BlockPursuitConfig(min_rows_per_block=2, feature_tau=0.45, activation_tau=0.45, stop_gain=0.0)
+    bank = EMBlockPursuitLearner(cfg).fit(R, feature_names=["a", "b", "c", "d"])
     assert bank.count >= 1
     scores = bank.score(R)
     assert scores.shape[0] == R.shape[0]
