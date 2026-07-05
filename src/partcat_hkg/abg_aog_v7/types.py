@@ -47,6 +47,10 @@ class V7NativeConfig:
     mdl_node_cost: float = 0.02
     mdl_branch_cost: float = 0.03
     mdl_relation_cost: float = 0.01
+    relation_weight: float = 0.35
+    port_weight: float = 0.10
+    relation_min_support: int = 6
+    relation_score_clip: float = 1.5
 
 
 @dataclass
@@ -192,6 +196,11 @@ class EvidenceLedgerV7:
     def visible_terminals(self) -> list[TerminalPacketV7]:
         return [t for t in self.terminals if t.accepted_visible and t.visible_score > 0.0]
 
+    def usable_terminals(self, *, include_amodal: bool = False) -> list[TerminalPacketV7]:
+        if include_amodal:
+            return [t for t in self.terminals if t.accepted_visible or t.accepted_amodal]
+        return self.visible_terminals()
+
     def summary(self) -> dict[str, float]:
         return {
             "entries": float(len(self.entries)),
@@ -250,6 +259,11 @@ class RelationFactorV7:
     weight: float = 1.0
     port_source_type: str | None = None
     port_target_type: str | None = None
+    source_part_id: int | None = None
+    target_part_id: int | None = None
+    support: int = 0
+    reliability: float = 0.0
+    enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
