@@ -7,7 +7,7 @@ import torch
 
 from .grammar import NativeGrammarV7
 from .port_bonds import ensure_ports
-from .relations import score_relation_factor
+from .relations_calibrated import score_relation_factor
 from .types import NodeKindV7, ParseForestV7, ParseHypothesisV7, SlotAssignmentV7, TerminalPacketV7, V7NativeConfig, VisibilityStateV7
 
 
@@ -22,16 +22,16 @@ class _State:
 
 
 class NativeChartParserV7:
-    """Beam chart parser for the native v7 AOG.
+    """Bounded chart parser for native v7 AOGs.
 
-    It supports OR selection, AND composition, terminal matching, part-template
-    branch recording, and horizontal relation scoring.  The implementation is
-    bounded by `beam_per_node` and produces a posterior parse forest.
+    This parser now records part-template branch posterior and uses calibrated,
+    support-gated relation factors rather than adding arbitrary relation scores.
     """
 
-    def __init__(self, grammar: NativeGrammarV7, *, cfg: V7NativeConfig | None = None) -> None:
+    def __init__(self, grammar: NativeGrammarV7, *, cfg: V7NativeConfig | None = None, enable_relations: bool = True) -> None:
         self.grammar = grammar
         self.cfg = cfg or V7NativeConfig()
+        self.enable_relations = bool(enable_relations)
 
     def parse(self, terminals: list[TerminalPacketV7], *, root_id: int | None = None) -> ParseForestV7:
         terminals = ensure_ports(terminals)
@@ -54,18 +54,22 @@ class NativeChartParserV7:
                 for child in rule.child_node_ids:
                     for st in self._parse_node(child, terminals, by_id, memo):
                         score = float(st.score + torch.log(torch.tensor(max(rule.branch_prior, 1e-8))).item() - rule.complexity_cost - node.complexity_cost)
-                        new = _State(score=score, terminal_ids=st.terminal_ids, slots=list(st.slots), relation_scores=list(st.relation_scores), class_id=st.class_id, pose_template_id=st.pose_template_id)
+                        new = _State(score=score, terminal_ids=st.terminal_ids, slots=[self._copy_slot(s) for s in st.slots], relation_scores=list(st.relation_scores), class_id=st.class_id, pose_template_id=st.pose_template_id)
                         if node.semantic_type == "object_class":
                             new.class_id = int(node.attributes.get("class_id", new.class_id if new.class_id is not None else -1))
                         if node.semantic_type == "object_pose":
                             new.pose_template_id = int(node.attributes.get("pose_template_id", new.pose_template_id if new.pose_template_id is not None else -1))
                         states.append(new)
+            if node.semantic_type == "functional_part" and states:
+                probs = torch.softmax(torch.tensor([s.score for s in states], dtype=torch.float32), dim=0).tolist()
+                for st, p in zip(states, probs):
+                    for slot in st.slots:
+                        if slot.slot_id == int(node_id) or slot.part_id == int(node.attributes.get("functional_part_id", slot.part_id)):
+                            slot.part_template_posterior = float(p)
         else:
-            states = [_State(score=-float(node.complexity_cost))]
+            states = []
             for rid in node.rules:
                 rule = self.grammar.rules[rid]
-                if rule.kind.value not in {"and_compose", "terminate"}:
-                    continue
                 cur = [_State(score=-float(rule.complexity_cost))]
                 for child in rule.child_node_ids:
                     child_states = self._parse_node(child, terminals, by_id, memo)
@@ -75,16 +79,22 @@ class NativeChartParserV7:
                         for b in child_states:
                             if used.intersection(b.terminal_ids):
                                 continue
-                            nxt.append(_State(score=a.score + b.score, terminal_ids=tuple(sorted(set(a.terminal_ids).union(b.terminal_ids))), slots=a.slots + b.slots, relation_scores=a.relation_scores + b.relation_scores, class_id=b.class_id if b.class_id is not None else a.class_id, pose_template_id=b.pose_template_id if b.pose_template_id is not None else a.pose_template_id))
+                            nxt.append(_State(score=a.score + b.score, terminal_ids=tuple(sorted(set(a.terminal_ids).union(b.terminal_ids))), slots=a.slots + [self._copy_slot(s) for s in b.slots], relation_scores=a.relation_scores + b.relation_scores, class_id=b.class_id if b.class_id is not None else a.class_id, pose_template_id=b.pose_template_id if b.pose_template_id is not None else a.pose_template_id))
                     cur = sorted(nxt, key=lambda s: s.score, reverse=True)[: int(self.cfg.beam_per_node)]
                 for st in cur:
                     st.score += -float(node.complexity_cost)
-                    st.relation_scores.extend(self._score_rule_relations(rule.relation_factors, st.terminal_ids, by_id))
-                    st.score += sum(float(r.get("total_score", 0.0)) for r in st.relation_scores[-len(rule.relation_factors):]) if rule.relation_factors else 0.0
-                states = cur
+                    if self.enable_relations and rule.relation_factors:
+                        rels = self._score_rule_relations(rule.relation_factors, st.terminal_ids, by_id)
+                        st.relation_scores.extend(rels)
+                        st.score += float(sum(float(r.get("total_score", 0.0)) for r in rels))
+                states.extend(cur)
         states = sorted(states, key=lambda s: s.score, reverse=True)[: int(self.cfg.beam_per_node)]
         memo[node_id] = states
         return states
+
+    @staticmethod
+    def _copy_slot(s: SlotAssignmentV7) -> SlotAssignmentV7:
+        return SlotAssignmentV7(slot_id=s.slot_id, part_id=s.part_id, terminal_id=s.terminal_id, visibility=s.visibility, score=s.score, part_template_id=s.part_template_id, part_template_posterior=s.part_template_posterior, subpart_assignments=list(s.subpart_assignments), port_assignments=list(s.port_assignments))
 
     def _parse_terminal(self, node_id: int, terminals: list[TerminalPacketV7]) -> list[_State]:
         node = self.grammar.nodes[node_id]
@@ -100,7 +110,12 @@ class NativeChartParserV7:
             if subpart_id is not None and t.subpart_id is not None and int(t.subpart_id) != int(subpart_id):
                 continue
             vis = VisibilityStateV7.VISIBLE if float(t.visible_score) >= float(self.cfg.visible_tau) else VisibilityStateV7.PARTIAL
-            slot = SlotAssignmentV7(slot_id=slot_id, part_id=int(t.functional_part_id), terminal_id=int(t.terminal_id), visibility=vis, score=float(t.visible_score), part_template_id=int(part_template_id) if part_template_id is not None else None, part_template_posterior=None, port_assignments=[(p.port_type, p.port_id) for p in t.ports])
+            subparts = []
+            if subpart_id is not None:
+                subparts.append(int(subpart_id))
+            elif t.subpart_id is not None:
+                subparts.append(int(t.subpart_id))
+            slot = SlotAssignmentV7(slot_id=slot_id, part_id=int(t.functional_part_id), terminal_id=int(t.terminal_id), visibility=vis, score=float(t.visible_score), part_template_id=int(part_template_id) if part_template_id is not None else None, part_template_posterior=None, subpart_assignments=subparts, port_assignments=[(p.port_type, p.port_id) for p in t.ports])
             states.append(_State(score=float(t.visible_score) - float(t.uncertainty), terminal_ids=(int(t.terminal_id),), slots=[slot]))
         if allow_absent or not states:
             target_part = int(part_id) if part_id is not None else -1
@@ -121,10 +136,10 @@ class NativeChartParserV7:
             best = None
             for i in range(len(terms)):
                 for j in range(i + 1, len(terms)):
-                    sc = score_relation_factor(terms[i], terms[j], factor)
+                    sc = score_relation_factor(terms[i], terms[j], factor, explicit_weight=float(self.cfg.relation_weight), port_weight=float(self.cfg.port_weight), min_support=int(self.cfg.relation_min_support))
                     if best is None or sc["total_score"] > best["total_score"]:
                         best = sc
-            if best is not None:
+            if best is not None and float(best.get("total_score", 0.0)) > 0.0:
                 best["relation_id"] = int(rid)
                 out.append(best)
         return out
