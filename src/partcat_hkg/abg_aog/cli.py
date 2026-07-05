@@ -52,6 +52,7 @@ def main() -> None:
     bank = PartTemplateBank.load(args.part_template_bank)
     base = TemplateAwareHierarchicalPRAAOGParser(bundle, ParserConfig(), PRAAOGConfig(top_k=5, posterior_tau=0.75, replace_logits_with_posterior=True), HierarchicalPRAAOGConfig(), part_template_bank=bank, adaptive_cfg=AdaptiveAOGConfig())
     model = ABGHKGAOGParser(base, cfg=V7AOGConfig(max_rounds=int(args.v7_max_rounds), max_queries_per_round=int(args.v7_max_queries))).to(device)
+    model.renderer.cfg.max_queries = int(args.v7_max_queries)
     if args.eval_only:
         print(evaluate_strict_aog(model, val_loader, device=device, enable_edges=not args.disable_edges, max_batches=int(args.max_val_batches)))
         return
