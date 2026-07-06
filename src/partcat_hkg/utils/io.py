@@ -22,8 +22,25 @@ def save_checkpoint(path: str | Path, model, extra: dict[str, Any] | None = None
     torch.save({"state_dict": model.state_dict(), "extra": extra or {}}, path)
 
 
-def load_checkpoint(path: str | Path, model, strict: bool = True) -> dict[str, Any]:
-    payload = torch.load(path, map_location="cpu")
-    state = payload.get("state_dict", payload)
+def load_checkpoint(
+    path: str | Path,
+    model=None,
+    strict: bool = True,
+    *,
+    map_location: str | torch.device = "cpu",
+) -> dict[str, Any]:
+    """Load a checkpoint, optionally into a model.
+
+    Backward-compatible behavior: ``load_checkpoint(path, model, strict=True)``
+    loads ``state_dict`` into ``model`` and returns the ``extra`` metadata.
+
+    Utility behavior for newer scripts: ``load_checkpoint(path, map_location=...)``
+    returns the raw payload when ``model`` is omitted.
+    """
+
+    payload = torch.load(path, map_location=map_location)
+    if model is None:
+        return payload
+    state = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
     model.load_state_dict(state, strict=strict)
-    return payload.get("extra", {})
+    return payload.get("extra", {}) if isinstance(payload, dict) else {}

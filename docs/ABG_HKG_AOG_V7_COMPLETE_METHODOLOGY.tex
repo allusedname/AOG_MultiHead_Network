@@ -1,0 +1,129 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,enumitem}
+\title{Complete ABG-HKG-AOG v7 Methodology and Implementation Specification}
+\date{\today}
+\begin{document}
+\maketitle
+
+\section{Goal}
+Complete v7 is a native recurrent attributed And-Or graph.  Stage 1 supplies image-grounded alpha evidence, beta parsing binds evidence into a parse forest, and gamma sends top-down queries back to Stage 1.  The output is a parse graph with class, pose, parts, subparts, ports, relations, visibility, occlusion, and scene ownership.
+
+\section{Hierarchy}
+The target grammar is
+\[
+\text{Scene OR}\rightarrow\text{SceneTemplate AND}\rightarrow\text{ObjectInstance OR}\rightarrow\text{ObjectClass OR}\rightarrow\text{ObjectPoseTemplate AND}\rightarrow\text{FunctionalPart OR}\rightarrow\text{PartTemplate AND}\rightarrow\text{Subpart/Port/Terminal}.
+\]
+OR nodes encode alternatives. AND nodes encode compositions. Terminals are image-supported packets. Horizontal edges encode geometry, contact, port/bond compatibility, occlusion, ownership, and semantic relations.
+
+\section{Typed Evidence}
+Each terminal is a packet
+\[
+T=(id, source, part, subpart, visible, amodal, tokens, ports, provenance).
+\]
+The packet stores visible score, visible mask, visible box, amodal score, amodal mask, amodal box, appearance/function/geometry tokens, semantic ports, uncertainty, source query id, and audit flags.  The evidence ledger enforces that graph prior alone cannot create visible evidence. Gamma proposes; alpha verifies.
+
+\section{Queryable Stage 1}
+Stage 1 exposes
+\[
+\texttt{forward\_global}(I)\rightarrow\{T_k\}, \qquad \texttt{requery}(I,q,\mathcal E)\rightarrow\{T'_k\}.
+\]
+The ROI re-query head receives an image crop, target part id, expected mask, context map, neighbor tokens, and relation context. It predicts visible mask, amodal mask, port heatmaps, visible score, amodal score, token, and uncertainty. The acceptance rule is
+\[
+\begin{cases}
+\text{visible},&s_\alpha\ge \tau_v,\\
+\text{partial},&\tau_p\le s_\alpha<\tau_v,\\
+\text{occluded},&s_\alpha<\tau_p\text{ and an occluder explains absence},\\
+\text{truncated},&\text{expected region crosses image boundary},\\
+\text{unresolved},&\text{otherwise}.
+\end{cases}
+\]
+
+\section{Native Grammar}
+A grammar node is
+\[
+v=(id,kind,semantic,children,rules,attributes,priors,C_v),
+\]
+where kind is OR, AND, or TERMINAL. A rule is
+\[
+r=(parent,children,type,p_r,required,optional,relations,C_r).
+\]
+The functional-part rule is
+\[
+\text{FunctionalPart OR}\rightarrow \text{PartTemplate}_1\mid\cdots\mid\text{PartTemplate}_m\mid\text{absent/unresolved}.
+\]
+For part $p$,
+\[
+S(p\mid I)=\log\sum_{\tau\in\mathcal T(p)}\exp S(\tau\mid I).
+\]
+For a part template $\tau$,
+\[
+S(\tau\mid I)=\sum_s S_\alpha(s)+\sum_b S_{port}(b)+S_{int}(\tau)+\log p(\tau\mid p)-C(\tau).
+\]
+
+\section{Parse Energy}
+For parse graph $pg$,
+\[
+S(pg\mid I)=S_\alpha+S_{rule}+S_{template}+S_{relation}+S_{port}+S_{visibility}+S_{scene}-C(pg).
+\]
+Class logits marginalize parse graphs:
+\[
+\ell_c(I)=\log\sum_{pg:y(pg)=c}\exp S(pg\mid I),
+\]
+approximated by top-$K$ parse forests.
+
+\section{Relations and Ports}
+Explicit relation channels include ABOVE, BELOW, LATERAL, NEAR, TOUCHING, OVERLAP, CONTAIN-I, and CONTAIN-J.  The edge score is
+\[
+S_{edge}(i,j)=S_{geom}(i,j)+S_{port}(i,j)+S_{token}(i,j).
+\]
+For ports $a,b$,
+\[
+S_{port}(a,b)=w_t Compat(type_a,type_b)+w_dG(\|x_a-x_b\|)+w_o\cos(\theta_a-\theta_b)+w_z sim(z_a,z_b).
+\]
+
+\section{Visibility and Occlusion}
+Slots have states visible, partially visible, occluded, truncated, absent, and unresolved.  Each slot may carry visible mask, amodal mask, occluder id, layer depth, and occlusion boundary. The visibility score is
+\[
+S_{vis}=S_{visible}+S_{partial}+S_{amodal}+S_{occluder}-S_{hallucination}.
+\]
+Amodal evidence is not counted as visible evidence.
+
+\section{Scene AOG}
+Scene parsing uses object hypotheses and a soft terminal ownership matrix
+\[
+O_{t,n}=p(\text{terminal }t\text{ belongs to object }n).
+\]
+The scene score is
+\[
+S(scene)=\sum_n S(object_n)+S_{own}+S_{objrel}+S_{layer}-C_{count}.
+\]
+
+\section{ABG Inference}
+Inference alternates:
+\[
+\text{global alpha}\rightarrow\text{beta parse}\rightarrow\text{gamma query}\rightarrow\text{ROI alpha re-query}\rightarrow\text{beta re-parse}.
+\]
+Query priority is
+\[
+Priority(q)=p(h)\,p(slot\mid h)\,Uncertainty\,Diagnosticity\,ExpectedGain-Cost(q).
+\]
+The loop stops when class margin and parse entropy stabilize or the query budget is exhausted.
+
+\section{Structure Learning}
+EM-style block pursuit uses response matrices at subpart, part, object, and scene levels.  The E-step parses examples and records active branches.  The M-step proposes reusable blocks, converts accepted blocks into grammar nodes, updates OR probabilities, and compacts the graph. A block is accepted only if penalized gain and validation effect justify complexity.
+
+\section{Loss}
+The complete training objective is
+\[
+L=L_{visible}+L_{amodal}+L_{port}+L_{parse}+L_{relation}+L_{requery}+L_{masked}+L_{scene}+L_{MDL}+L_{latent}.
+\]
+The latent residual term is optional and late-stage only.
+
+\section{Training Order}
+Train global Stage 1, then the ROI re-query head, then native grammar parsing, then learned ports, then recurrent ABG parsing, then amodal/layer reasoning, then scene AOG, then structure learning and semi-supervised expansion.
+
+\section{Definition of Complete v7}
+Complete v7 requires image-supported ROI re-query, native part-template OR nodes, parse forests with part-template/subpart/port posterior, explicit plus port-aware relations, separated visible/amodal states, joint scene ownership, grammar-changing block pursuit, graph compaction, semi-supervised grammar deltas, and query/hallucination audits.
+
+\end{document}
