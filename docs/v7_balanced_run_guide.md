@@ -1,22 +1,63 @@
 # V7 Balanced Run Guide
 
-The uploaded failure diagnostics showed a severe no-relation collapse: the unary node/template path was too weak and relation scoring was doing too much of the classification. I added the immediate repair and diagnostic code to src/partcat_hkg/abg_aog_v7/diagnostics.py.
+The latest experiment summary shows that the first balanced scorer fixed the severe no-relation collapse, but it still plateaued around 64.4 percent. Relation weight barely matters, true class is usually in the top five, and many predicted classes still have missing required slots. That points to a ranking/calibration problem inside the unary node score, not a beam or relation problem.
 
-New public functions in that file: build_profile_bank_v7, BalancedAOGScorerV7, run_balanced_failure_diagnostics, and ProfileBankV7.
+## Current fix
 
-The new scorer decomposes each candidate class into root_prior_score, node_presence_score, part_template_score, required_slot_penalty, absent_slot_penalty, extra_part_penalty, role_score, relation_score, port_score, total_score, and rank.
+I added a compact v2 runner:
 
-The first target is not final accuracy. The first target is to remove the no-relation collapse. The no-relation run should no longer predict one class for most validation samples. The true_class_not_in_top5 count should drop, node_presence_score should separate classes, and required_slot_penalty should expose missing-part failures.
+```text
+scripts/run_v7_balanced_v2_min.py
+```
 
-Recommended run sequence:
+The v2 runner keeps the class-balanced profile idea, but adds two missing pieces from the explicit KG design:
 
-1. Load the train and validation terminal caches.
-2. Build a ProfileBankV7 with build_profile_bank_v7 using the train records, schema class names, and schema part names.
-3. Save the profile bank to profile_bank.pt.
-4. Run run_balanced_failure_diagnostics on the validation records with relation_weight set to 0.0.
-5. Inspect diagnostic_summary.json, class_score_decomposition.csv, candidate_scores_topn.csv, failure_flags_by_sample.csv, and confusion_matrix_long.csv.
-6. Only after the no-relation profile is meaningful, sweep relation_weight over 0.00, 0.05, 0.10, 0.20, and 0.35.
+```text
+1. class-part token prototype similarity from terminal_token;
+2. explicit absence evidence and stronger missing-required penalty.
+```
 
-The key output is class_score_decomposition.csv. It shows whether the wrong class wins because of prior, node evidence, template geometry, missing required slots, role mismatch, relation score, or port score.
+The old score used class-vs-global part diagnosticity and geometry. The new score adds token prototype similarity and a Bernoulli-style absence term so a class-specific required part that is missing can reduce the candidate score even when the true class is already in the saved top five.
 
-If the balanced no-relation path still collapses, the next code change should add class-conditioned token prototype similarity from the explicit KG path. The current diagnostic patch implements balanced priors, class-vs-global diagnosticity, template geometry, required-slot penalties, and small functional-role residuals, but it does not assume that every cache contains stable token fields.
+## Run
+
+```bash
+export TRAIN_CACHE=/path/to/train_strict_aog_terminals.pt
+export VAL_CACHE=/path/to/val_strict_aog_terminals.pt
+export OUT_DIR=/path/to/runs/v7_balanced_v2
+python scripts/run_v7_balanced_v2_min.py
+```
+
+The script writes:
+
+```text
+diagnostic_summary.json
+class_score_decomposition.csv
+candidate_scores_topn.csv
+failure_flags_by_sample.csv
+confusion_matrix_long.csv
+```
+
+## What to compare
+
+Compare the new `diagnostic_summary.json` against the uploaded summary:
+
+```text
+old best accuracy: 0.64398
+old true_class_not_in_top5: 20
+old missing_required_pred: 402
+```
+
+The expected improvement is not necessarily from relation. The first check is whether `missing_required_pred` drops and whether the true class moves from rank 2 to rank 1 in ambiguous samples.
+
+## What to inspect
+
+Use `class_score_decomposition.csv` and compare the true class row with the predicted class row. The new columns to focus on are:
+
+```text
+token_prototype_score
+node_absence_score
+required_slot_penalty
+```
+
+If the model still fails, the next likely issue is not relation weighting. It is that terminal tokens are weak or unavailable in the cache, in which case the proper fix is to reuse Stage-2 class-part prototypes from the explicit KG path rather than relying only on cached terminal ids and geometry.
