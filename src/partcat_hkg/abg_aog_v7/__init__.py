@@ -51,7 +51,7 @@ from .abg_recursive import (
     ClassBeliefV7,
     SlotBeliefV7,
 )
-from .complete_extensions import (
+from .complete_extensions_integrated import (
     CALIBRATOR_FEATURES_V7,
     BlockPursuitReportV7,
     CalibratedNativeMultiSlotParserV7,
