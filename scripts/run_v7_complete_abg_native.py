@@ -24,7 +24,7 @@ from partcat_hkg.abg_aog_v7.multislot_native import (
 )
 from partcat_hkg.abg_aog_v7.terminal_adapter import terminal_packets_from_record
 from partcat_hkg.abg_aog_v7.terminal_components import terminal_packets_from_record_components
-from partcat_hkg.abg_aog_v7.complete_extensions import (
+from partcat_hkg.abg_aog_v7.complete_extensions_integrated import (
     CalibratedNativeMultiSlotParserV7,
     InstanceSplitterConfigV7,
     LearnedScoreCalibratorV7,
@@ -89,8 +89,6 @@ def main() -> None:
         min_relation_support=int(os.environ.get("MIN_RELATION_SUPPORT", "6")),
     )
 
-    # 6. Penalized EM block pursuit + graph compression.  This annotates the bank
-    # with shared/compressed block structure and writes a report.
     if _env_bool("RUN_BLOCK_PURSUIT", "1"):
         pursuit = penalized_em_block_pursuit_v7(
             bank,
@@ -115,7 +113,6 @@ def main() -> None:
         top_k=int(os.environ.get("TOP_K", "5")),
     )
 
-    # 4. Class-level pose OR clustering.
     if _env_bool("RUN_POSE_CLUSTERING", "1"):
         pose_bank = learn_pose_bank_v7(
             bank,
@@ -127,7 +124,6 @@ def main() -> None:
         pose_bank.save(out_dir / "pose_bank.pt")
         parser = PoseAwareNativeMultiSlotParserV7(bank, pose_bank, relation_weight=relation_weight, beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")), top_k=int(os.environ.get("TOP_K", "5")))
 
-    # 3. Learned calibrator weights merged into parser scoring.
     if _env_bool("RUN_LEARNED_CALIBRATOR", "1"):
         cal_path = os.environ.get("CALIBRATOR_CKPT", "")
         if cal_path and Path(cal_path).exists():
@@ -155,8 +151,6 @@ def main() -> None:
     )
     engine = ABGRecursiveEngineV7(bank, parser=parser, abg_cfg=abg_cfg)
 
-    # 1. Real Stage-1/ROI requery wrapper.  When ENABLE_STAGE1_REQUERY=1 and
-    # the records contain image tensors, gamma queries are sent to this wrapper.
     stage1 = None
     if _env_bool("ENABLE_STAGE1_REQUERY", "0"):
         stage1 = build_stage1_roi_wrapper_v7(Stage1ROIWrapperConfigV7(
@@ -185,20 +179,7 @@ def main() -> None:
         confusion[(y, pred)] += 1
         matched = sum(1 for s in (forest.map_parse.slots if forest.map_parse else []) if s.terminal_id is not None)
         missing = sum(1 for s in (forest.map_parse.slots if forest.map_parse else []) if s.terminal_id is None)
-        per_sample.append({
-            "sample_id": sid,
-            "true_class": y,
-            "pred_class": pred,
-            "correct": pred == y,
-            "entropy": float(forest.entropy),
-            "map_score": None if forest.map_parse is None else float(forest.map_parse.score),
-            "matched_slots": matched,
-            "missing_slots": missing,
-            "num_terminals": len(terms),
-            "abg_rounds": len(result.traces),
-            "queries": len(result.queries),
-            "accepted_queries": sum(1 for r in result.requery_results if r.accepted),
-        })
+        per_sample.append({"sample_id": sid, "true_class": y, "pred_class": pred, "correct": pred == y, "entropy": float(forest.entropy), "map_score": None if forest.map_parse is None else float(forest.map_parse.score), "matched_slots": matched, "missing_slots": missing, "num_terminals": len(terms), "abg_rounds": len(result.traces), "queries": len(result.queries), "accepted_queries": sum(1 for r in result.requery_results if r.accepted)})
         for h in forest.hypotheses:
             candidate_rows.append({"sample_id": sid, "true_class": y, "candidate_class": h.class_id, "score": float(h.score), "posterior": float(h.posterior), "matched_slots": sum(1 for s in h.slots if s.terminal_id is not None), "missing_slots": sum(1 for s in h.slots if s.terminal_id is None)})
         for q in result.queries:
@@ -211,31 +192,11 @@ def main() -> None:
     _write_csv(out_dir / "gamma_queries.csv", query_rows)
     _write_csv(out_dir / "confusion_matrix_long.csv", [{"true_class": a, "pred_class": b, "count": c} for (a, b), c in sorted(confusion.items())])
 
-    # 5. Scene-level multi-object ownership and object-template reuse.
     scene_summary = None
     if _env_bool("RUN_SCENE_PARSER", "1"):
         scene_summary = evaluate_scene_parser_v7(val_records, MultiObjectSceneParserV7(parser, max_objects=int(os.environ.get("MAX_SCENE_OBJECTS", "4"))), out_dir=out_dir / "scene", score_tau=score_tau)
 
-    summary = {
-        "samples": len(per_sample),
-        "accuracy": correct / max(1, len(per_sample)),
-        "num_slots": len(bank.slots),
-        "num_slot_relations": len(bank.relations),
-        "grammar_nodes": len(grammar.nodes),
-        "grammar_rules": len(grammar.rules),
-        "grammar_relations": len(grammar.relations),
-        "mean_queries": sum(r["queries"] for r in per_sample) / max(1, len(per_sample)),
-        "mean_accepted_queries": sum(r["accepted_queries"] for r in per_sample) / max(1, len(per_sample)),
-        "mean_missing_slots": sum(r["missing_slots"] for r in per_sample) / max(1, len(per_sample)),
-        "pred_distribution": dict(Counter(r["pred_class"] for r in per_sample)),
-        "abg_cfg": abg_cfg.__dict__,
-        "stage1_requery_enabled": stage1 is not None,
-        "learned_calibrator_enabled": _env_bool("RUN_LEARNED_CALIBRATOR", "1"),
-        "pose_clustering_enabled": _env_bool("RUN_POSE_CLUSTERING", "1"),
-        "block_pursuit_enabled": _env_bool("RUN_BLOCK_PURSUIT", "1"),
-        "split_connected_instances": split_connected,
-        "scene_summary": scene_summary,
-    }
+    summary = {"samples": len(per_sample), "accuracy": correct / max(1, len(per_sample)), "num_slots": len(bank.slots), "num_slot_relations": len(bank.relations), "grammar_nodes": len(grammar.nodes), "grammar_rules": len(grammar.rules), "grammar_relations": len(grammar.relations), "mean_queries": sum(r["queries"] for r in per_sample) / max(1, len(per_sample)), "mean_accepted_queries": sum(r["accepted_queries"] for r in per_sample) / max(1, len(per_sample)), "mean_missing_slots": sum(r["missing_slots"] for r in per_sample) / max(1, len(per_sample)), "pred_distribution": dict(Counter(r["pred_class"] for r in per_sample)), "abg_cfg": abg_cfg.__dict__, "stage1_requery_enabled": stage1 is not None, "learned_calibrator_enabled": _env_bool("RUN_LEARNED_CALIBRATOR", "1"), "pose_clustering_enabled": _env_bool("RUN_POSE_CLUSTERING", "1"), "block_pursuit_enabled": _env_bool("RUN_BLOCK_PURSUIT", "1"), "split_connected_instances": split_connected, "scene_summary": scene_summary}
     (out_dir / "diagnostic_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
