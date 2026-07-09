@@ -22,7 +22,14 @@ class _State:
 
 
 class NativeChartParserV7:
-    """Bounded chart parser for native v7 AOGs."""
+    """Bounded chart parser for native v7 AOGs.
+
+    This version fixes a previous propagation bug: object_class and object_pose
+    nodes were often AND nodes, but the parser only copied class/pose attributes
+    inside the OR-node branch.  The class id and pose id are now also propagated
+    through AND nodes, so native grammars built with class AND nodes produce
+    meaningful candidate-class hypotheses.
+    """
 
     def __init__(self, grammar: NativeGrammarV7, *, cfg: V7NativeConfig | None = None, enable_relations: bool = True) -> None:
         self.grammar = grammar
@@ -56,7 +63,7 @@ class NativeChartParserV7:
                         if node.semantic_type == "object_pose":
                             new.pose_template_id = int(node.attributes.get("pose_template_id", new.pose_template_id if new.pose_template_id is not None else -1))
                         states.append(new)
-            if node.semantic_type == "functional_part" and states:
+            if node.semantic_type in {"functional_part", "functional_slot"} and states:
                 probs = torch.softmax(torch.tensor([s.score for s in states], dtype=torch.float32), dim=0).tolist()
                 for st, p in zip(states, probs):
                     for slot in st.slots:
@@ -79,6 +86,10 @@ class NativeChartParserV7:
                     cur = sorted(nxt, key=lambda s: s.score, reverse=True)[: int(self.cfg.beam_per_node)]
                 for st in cur:
                     st.score += -float(node.complexity_cost)
+                    if node.semantic_type == "object_class":
+                        st.class_id = int(node.attributes.get("class_id", st.class_id if st.class_id is not None else -1))
+                    if node.semantic_type == "object_pose":
+                        st.pose_template_id = int(node.attributes.get("pose_template_id", st.pose_template_id if st.pose_template_id is not None else -1))
                     if self.enable_relations and rule.relation_factors:
                         rels = self._score_rule_relations(rule.relation_factors, st.terminal_ids, by_id)
                         st.relation_scores.extend(rels)
@@ -135,7 +146,8 @@ class NativeChartParserV7:
         if allow_absent or not states:
             target_part = int(part_id) if part_id is not None else -1
             vis = VisibilityStateV7.ABSENT if allow_absent else VisibilityStateV7.UNRESOLVED
-            penalty = -0.05 if allow_absent else -float(self.cfg.hallucination_penalty)
+            req = float(node.attributes.get("requiredness", 0.0))
+            penalty = -(0.05 + 0.7 * req) if allow_absent else -float(self.cfg.hallucination_penalty)
             states.append(_State(score=penalty, terminal_ids=(), slots=[SlotAssignmentV7(slot_id=slot_id, part_id=target_part, terminal_id=None, visibility=vis, score=penalty, part_template_id=int(part_template_id) if part_template_id is not None else None)]))
         return states
 
