@@ -41,6 +41,7 @@ from .multislot_native import (
     evaluate_multislot_parser,
     match_slots_beam,
 )
+from .class_diverse_parser import ClassDiverseNativeMultiSlotParserV7, prune_class_diverse_v7, renumber_hypotheses_v7
 from .terminal_components import split_terminal_components, terminal_packets_from_record_components
 from .abg_recursive import (
     ABGBeliefConfigV7,
