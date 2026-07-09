@@ -15,13 +15,7 @@ if str(SRC) not in sys.path:
 from partcat_hkg.strict_aog.terminals import load_terminal_cache
 from partcat_hkg.data.schema import RoleSchema
 from partcat_hkg.abg_aog_v7.abg_recursive import ABGBeliefConfigV7, ABGRecursiveEngineV7
-from partcat_hkg.abg_aog_v7.multislot_native import (
-    NativeMultiSlotParserV7,
-    build_multislot_bank_from_records,
-    build_native_grammar_from_multislot_bank,
-    record_label,
-    _write_csv,
-)
+from partcat_hkg.abg_aog_v7.multislot_native import NativeMultiSlotParserV7, build_multislot_bank_from_records, build_native_grammar_from_multislot_bank, record_label, _write_csv
 from partcat_hkg.abg_aog_v7.terminal_adapter import terminal_packets_from_record
 from partcat_hkg.abg_aog_v7.terminal_components import terminal_packets_from_record_components
 from partcat_hkg.abg_aog_v7.complete_extensions_integrated import (
@@ -50,12 +44,7 @@ def _make_terms(rec, sid: int, score_tau: float, *, split_components: bool, spli
         return terminal_packets_from_record_components(rec, sample_id=sid, score_tau=score_tau, include_tokens=True, include_masks=True)
     terms = terminal_packets_from_record(rec, sample_id=sid, score_tau=score_tau, include_tokens=True, include_masks=True)
     if split_connected:
-        cfg = InstanceSplitterConfigV7(
-            min_area=int(os.environ.get("INSTANCE_MIN_AREA", "8")),
-            max_instances=int(os.environ.get("INSTANCE_MAX_INSTANCES", "8")),
-            peak_rel_threshold=float(os.environ.get("INSTANCE_PEAK_REL_THR", "0.40")),
-            min_peak_distance=int(os.environ.get("INSTANCE_MIN_PEAK_DIST", "5")),
-        )
+        cfg = InstanceSplitterConfigV7(min_area=int(os.environ.get("INSTANCE_MIN_AREA", "8")), max_instances=int(os.environ.get("INSTANCE_MAX_INSTANCES", "8")), peak_rel_threshold=float(os.environ.get("INSTANCE_PEAK_REL_THR", "0.40")), min_peak_distance=int(os.environ.get("INSTANCE_MIN_PEAK_DIST", "5")))
         return split_terminal_instances_v7(terms, cfg=cfg)
     return terms
 
@@ -78,26 +67,10 @@ def main() -> None:
     if max_val > 0:
         val_records = val_records[:max_val]
 
-    bank = build_multislot_bank_from_records(
-        train_records,
-        class_names=list(schema.class_names),
-        part_names=list(schema.part_names),
-        score_tau=score_tau,
-        max_slots_per_part=int(os.environ.get("MAX_SLOTS_PER_PART", "6")),
-        required_tau=float(os.environ.get("REQUIRED_TAU", "0.35")),
-        min_slot_support=int(os.environ.get("MIN_SLOT_SUPPORT", "3")),
-        min_relation_support=int(os.environ.get("MIN_RELATION_SUPPORT", "6")),
-    )
+    bank = build_multislot_bank_from_records(train_records, class_names=list(schema.class_names), part_names=list(schema.part_names), score_tau=score_tau, max_slots_per_part=int(os.environ.get("MAX_SLOTS_PER_PART", "6")), required_tau=float(os.environ.get("REQUIRED_TAU", "0.35")), min_slot_support=int(os.environ.get("MIN_SLOT_SUPPORT", "3")), min_relation_support=int(os.environ.get("MIN_RELATION_SUPPORT", "6")))
 
     if _env_bool("RUN_BLOCK_PURSUIT", "1"):
-        pursuit = penalized_em_block_pursuit_v7(
-            bank,
-            train_records,
-            max_blocks=int(os.environ.get("MAX_PURSUIT_BLOCKS", "32")),
-            min_support=int(os.environ.get("PURSUIT_MIN_SUPPORT", "6")),
-            penalty_weight=float(os.environ.get("PURSUIT_PENALTY", "0.10")),
-            score_tau=score_tau,
-        )
+        pursuit = penalized_em_block_pursuit_v7(bank, train_records, max_blocks=int(os.environ.get("MAX_PURSUIT_BLOCKS", "32")), min_support=int(os.environ.get("PURSUIT_MIN_SUPPORT", "6")), penalty_weight=float(os.environ.get("PURSUIT_PENALTY", "0.10")), score_tau=score_tau)
         bank = apply_pursued_blocks_to_bank_v7(bank, pursuit)
         (out_dir / "block_pursuit_report.json").write_text(json.dumps(pursuit.to_payload(), indent=2), encoding="utf-8")
 
@@ -106,21 +79,11 @@ def main() -> None:
     grammar.save(out_dir / "native_multislot_grammar.pt")
 
     relation_weight = float(os.environ.get("RELATION_WEIGHT", "0.05"))
-    parser: NativeMultiSlotParserV7 = NativeMultiSlotParserV7(
-        bank,
-        relation_weight=relation_weight,
-        beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")),
-        top_k=int(os.environ.get("TOP_K", "5")),
-    )
+    parser: NativeMultiSlotParserV7 = NativeMultiSlotParserV7(bank, relation_weight=relation_weight, beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")), top_k=int(os.environ.get("TOP_K", "5")))
 
+    pose_bank = None
     if _env_bool("RUN_POSE_CLUSTERING", "1"):
-        pose_bank = learn_pose_bank_v7(
-            bank,
-            train_records,
-            score_tau=score_tau,
-            max_poses_per_class=int(os.environ.get("MAX_POSES_PER_CLASS", "4")),
-            min_pose_support=int(os.environ.get("MIN_POSE_SUPPORT", "6")),
-        )
+        pose_bank = learn_pose_bank_v7(bank, train_records, score_tau=score_tau, max_poses_per_class=int(os.environ.get("MAX_POSES_PER_CLASS", "4")), min_pose_support=int(os.environ.get("MIN_POSE_SUPPORT", "6")))
         pose_bank.save(out_dir / "pose_bank.pt")
         parser = PoseAwareNativeMultiSlotParserV7(bank, pose_bank, relation_weight=relation_weight, beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")), top_k=int(os.environ.get("TOP_K", "5")))
 
@@ -129,43 +92,19 @@ def main() -> None:
         if cal_path and Path(cal_path).exists():
             calibrator = LearnedScoreCalibratorV7.load(cal_path)
         else:
-            calibrator = train_multislot_calibrator_v7(
-                bank,
-                train_records,
-                score_tau=score_tau,
-                epochs=int(os.environ.get("CALIBRATOR_EPOCHS", "600")),
-                lr=float(os.environ.get("CALIBRATOR_LR", "0.05")),
-                wd=float(os.environ.get("CALIBRATOR_WD", "0.001")),
-            )
+            calibrator = train_multislot_calibrator_v7(bank, train_records, score_tau=score_tau, epochs=int(os.environ.get("CALIBRATOR_EPOCHS", "600")), lr=float(os.environ.get("CALIBRATOR_LR", "0.05")), wd=float(os.environ.get("CALIBRATOR_WD", "0.001")))
             calibrator.save(out_dir / "calibrator.pt")
-        parser = CalibratedNativeMultiSlotParserV7(bank, calibrator, relation_weight=relation_weight, beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")), top_k=int(os.environ.get("TOP_K", "5")))
+        parser = CalibratedNativeMultiSlotParserV7(bank, calibrator, pose_bank=pose_bank, relation_weight=relation_weight, beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")), top_k=int(os.environ.get("TOP_K", "5")))
 
-    abg_cfg = ABGBeliefConfigV7(
-        max_rounds=int(os.environ.get("MAX_ABG_ROUNDS", "3")),
-        query_budget=int(os.environ.get("QUERY_BUDGET", "4")),
-        beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")),
-        candidate_classes=int(os.environ.get("CANDIDATE_CLASSES", "5")),
-        score_tau=score_tau,
-        relation_weight=relation_weight,
-        split_components=_env_bool("SPLIT_COMPONENTS", "1"),
-    )
+    abg_cfg = ABGBeliefConfigV7(max_rounds=int(os.environ.get("MAX_ABG_ROUNDS", "3")), query_budget=int(os.environ.get("QUERY_BUDGET", "4")), beam_per_class=int(os.environ.get("BEAM_PER_CLASS", "64")), candidate_classes=int(os.environ.get("CANDIDATE_CLASSES", "5")), score_tau=score_tau, relation_weight=relation_weight, split_components=_env_bool("SPLIT_COMPONENTS", "1"))
     engine = ABGRecursiveEngineV7(bank, parser=parser, abg_cfg=abg_cfg)
 
     stage1 = None
     if _env_bool("ENABLE_STAGE1_REQUERY", "0"):
-        stage1 = build_stage1_roi_wrapper_v7(Stage1ROIWrapperConfigV7(
-            checkpoint=os.environ.get("ROI_CKPT", ""),
-            num_parts=int(os.environ.get("ROI_NUM_PARTS", str(max(1, len(schema.part_names))))),
-            num_port_types=int(os.environ.get("ROI_NUM_PORT_TYPES", "8")),
-            token_dim=int(os.environ.get("ROI_TOKEN_DIM", "128")),
-            crop_size=int(os.environ.get("ROI_CROP_SIZE", "64")),
-            device=os.environ.get("ROI_DEVICE", "cuda"),
-        ))
+        stage1 = build_stage1_roi_wrapper_v7(Stage1ROIWrapperConfigV7(checkpoint=os.environ.get("ROI_CKPT", ""), num_parts=int(os.environ.get("ROI_NUM_PARTS", str(max(1, len(schema.part_names))))), num_port_types=int(os.environ.get("ROI_NUM_PORT_TYPES", "8")), token_dim=int(os.environ.get("ROI_TOKEN_DIM", "128")), crop_size=int(os.environ.get("ROI_CROP_SIZE", "64")), device=os.environ.get("ROI_DEVICE", "cuda")))
 
     split_connected = _env_bool("SPLIT_CONNECTED_INSTANCES", "1")
-    per_sample = []
-    candidate_rows = []
-    query_rows = []
+    per_sample, candidate_rows, query_rows = [], [], []
     correct = 0
     confusion = Counter()
     for sid, rec in enumerate(val_records):
