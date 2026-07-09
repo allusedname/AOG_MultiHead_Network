@@ -42,5 +42,14 @@ from .multislot_native import (
     match_slots_beam,
 )
 from .terminal_components import split_terminal_components, terminal_packets_from_record_components
+from .abg_recursive import (
+    ABGBeliefConfigV7,
+    ABGBeliefConfigV7 as ABGRecursiveConfigV7,
+    ABGRecursiveEngineV7,
+    ABGRecursiveResultV7,
+    ABGRoundTraceV7,
+    ClassBeliefV7,
+    SlotBeliefV7,
+)
 
 __all__ = [name for name in globals() if not name.startswith('_')]
