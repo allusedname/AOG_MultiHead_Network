@@ -30,5 +30,17 @@ from .delta_expansion import ExpansionConfigV7, GrammarDeltaV7, SemiSupervisedGr
 from .port_bonds import PortOntologyV7, best_port_match, geometry_ports
 from .relations import RELATION_CHANNELS, box_relation_vector, score_relation_factor
 from .occlusion import VisibilityDecisionV7, decide_visibility
+from .multislot_native import (
+    MultiSlotBankV7,
+    MultiSlotRelationV7,
+    MultiSlotTemplateV7,
+    NativeMultiSlotParserV7,
+    build_multislot_bank_from_records,
+    build_multislot_bank_from_terminal_cache,
+    build_native_grammar_from_multislot_bank,
+    evaluate_multislot_parser,
+    match_slots_beam,
+)
+from .terminal_components import split_terminal_components, terminal_packets_from_record_components
 
 __all__ = [name for name in globals() if not name.startswith('_')]
