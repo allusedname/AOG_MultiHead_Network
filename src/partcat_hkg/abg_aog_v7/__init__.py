@@ -51,5 +51,28 @@ from .abg_recursive import (
     ClassBeliefV7,
     SlotBeliefV7,
 )
+from .complete_extensions import (
+    CALIBRATOR_FEATURES_V7,
+    BlockPursuitReportV7,
+    CalibratedNativeMultiSlotParserV7,
+    InstanceSplitterConfigV7,
+    LearnedScoreCalibratorV7,
+    MultiObjectSceneParserV7,
+    PoseAwareNativeMultiSlotParserV7,
+    PoseBankV7,
+    PoseTemplateV7,
+    PursuedBlockV7,
+    SceneObjectV7,
+    SceneParseV7,
+    Stage1ROIWrapperConfigV7,
+    apply_pursued_blocks_to_bank_v7,
+    build_stage1_roi_wrapper_v7,
+    evaluate_scene_parser_v7,
+    learn_pose_bank_v7,
+    penalized_em_block_pursuit_v7,
+    split_connected_blob_instances,
+    split_terminal_instances_v7,
+    train_multislot_calibrator_v7,
+)
 
 __all__ = [name for name in globals() if not name.startswith('_')]
