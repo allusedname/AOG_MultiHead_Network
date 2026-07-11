@@ -58,6 +58,9 @@ class Stage1Config:
     dino_input_size: int = 224
     dino_weights: str = ""
     freeze_dino: bool = True
+    # Checkpoint reconstruction can initialize the architecture without
+    # downloading pretrained weights, then restore the serialized DINO state.
+    dino_pretrained_init: bool = True
 
     # PartCAT-style cost aggregation. The functional part cost volume is first
     # embedded with grouped pointwise convolutions, then optionally aggregated

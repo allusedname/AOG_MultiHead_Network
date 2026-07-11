@@ -43,6 +43,17 @@ class V7NativeConfig:
     query_min_posterior: float = 0.03
     visible_tau: float = 0.55
     partial_tau: float = 0.25
+    amodal_tau: float = 0.65
+    amodal_min_mask_fraction: float = 0.002
+    amodal_parse_weight: float = 0.25
+    requery_mask_tau: float = 0.50
+    requery_min_mask_fraction: float = 0.002
+    requery_max_uncertainty: float = 0.75
+    requery_mask_canvas_size: int = 64
+    requery_require_mask: bool = True
+    requery_duplicate_iou: float = 0.45
+    requery_min_texture_std: float = 0.01
+    requery_min_edge_energy: float = 0.005
     hallucination_penalty: float = 0.40
     mdl_node_cost: float = 0.02
     mdl_branch_cost: float = 0.03
@@ -137,6 +148,7 @@ class GammaQueryV7:
     expected_amodal_region: torch.Tensor | None = None
     expected_ports: list[str] = field(default_factory=list)
     neighbor_terminal_ids: list[int] = field(default_factory=list)
+    context_terminal_ids: list[int] = field(default_factory=list)
     relation_context: list[dict[str, Any]] = field(default_factory=list)
     reason: str = "unresolved required slot"
 
@@ -187,8 +199,63 @@ class EvidenceLedgerV7:
     def add_prior_query(self, query: GammaQueryV7) -> None:
         self.entries.append(EvidenceEntryV7(None, query.query_id, EvidenceSourceV7.GRAPH_PRIOR, 0.0, float(query.posterior_support), False, True, 0.0, ["prior_only_not_visible"]))
 
+    @staticmethod
+    def inherit_requery_semantics(
+        terminals: list[TerminalPacketV7],
+        results: list[RequeryResultV7],
+    ) -> None:
+        """Keep semantic tokens when a spatial-only ROI result replaces alpha evidence."""
+        by_id = {int(terminal.terminal_id): terminal for terminal in terminals}
+        for result in results:
+            if not result.accepted:
+                continue
+            donors = [
+                by_id[int(terminal_id)]
+                for terminal_id in result.query.neighbor_terminal_ids
+                if int(terminal_id) in by_id
+            ]
+            for refined in result.terminals:
+                donor = next(
+                    (
+                        terminal
+                        for terminal in donors
+                        if int(terminal.functional_part_id)
+                        == int(refined.functional_part_id)
+                    ),
+                    None,
+                )
+                if donor is None:
+                    continue
+                inherited = False
+                if refined.appearance_token is None and donor.appearance_token is not None:
+                    refined.appearance_token = donor.appearance_token
+                    inherited = True
+                if refined.function_token is None and donor.function_token is not None:
+                    refined.function_token = donor.function_token
+                    inherited = True
+                if inherited:
+                    flag = f"inherited_alpha_semantic_tokens:{int(donor.terminal_id)}"
+                    if flag not in refined.audit_flags:
+                        refined.audit_flags.append(flag)
+
     def merge_requery(self, results: list[RequeryResultV7]) -> None:
+        self.inherit_requery_semantics(self.visible_terminals(), results)
         for r in results:
+            accepted_visible = any(t.accepted_visible for t in r.terminals)
+            if r.accepted and accepted_visible and r.query.neighbor_terminal_ids:
+                superseded = {int(value) for value in r.query.neighbor_terminal_ids}
+                for terminal in self.terminals:
+                    if int(terminal.terminal_id) in superseded:
+                        terminal.accepted_visible = False
+                        terminal.audit_flags.append(
+                            f"superseded_by_query_{int(r.query.query_id)}"
+                        )
+                for entry in self.entries:
+                    if entry.terminal_id is not None and int(entry.terminal_id) in superseded:
+                        entry.accepted_visible = False
+                        entry.audit_flags.append(
+                            f"superseded_by_query_{int(r.query.query_id)}"
+                        )
             for t in r.terminals:
                 self.terminals.append(t)
                 self.entries.append(EvidenceEntryV7(t.terminal_id, r.query.query_id, t.source, float(t.visible_score), float(r.query.posterior_support), bool(t.accepted_visible), bool(t.accepted_amodal), float(max(0.0, t.uncertainty)), list(t.audit_flags)))
@@ -288,8 +355,12 @@ class SlotAssignmentV7:
     score: float
     part_template_id: int | None = None
     part_template_posterior: float | None = None
+    assignment_posterior: float | None = None
     subpart_assignments: list[int] = field(default_factory=list)
+    subpart_labels: list[str] = field(default_factory=list)
+    subpart_assignment_scores: list[float] = field(default_factory=list)
     port_assignments: list[tuple[str, int]] = field(default_factory=list)
+    port_assignment_scores: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

@@ -1,0 +1,573 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{microtype}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\newcommand{\AOG}{\textsc{AOG}}
+\newcommand{\ABG}{\ensuremath{\alpha\!\text{-}\!\beta\!\text{-}\!\gamma}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{PartImageNet ABG--HKG--AOG Core\\
+Implemented Architecture, Inference, Learning, and Validation Specification}
+\author{AOG Multi-Head Network Project}
+\date{Implementation branch: \code{codex/partimagenet-aog-core}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document specifies the PartImageNet model core implemented in the
+\code{codex/partimagenet-aog-core} branch. The model represents Stage-1 part
+predictions as typed terminal evidence, learns class-specific repeated slots and
+horizontal relations, materializes a native attributed And-Or Graph, preserves
+class-diverse parse hypotheses, and supports recurrent \ABG{} inference through a
+validated image-backed region-of-interest re-query head. The implementation also
+contains explicit visibility and amodal states, pose alternatives, learned score
+calibration, reusable object hypotheses for multi-object scene parsing, and
+complexity-controlled structure learning. The document distinguishes executable
+code from empirical claims: no ImageNet adaptation, experiment artifact, or
+dataset-level performance claim is part of this branch.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Status and Scope}
+
+The branch contains a reusable PartImageNet model library and tests. It excludes
+ImageNet transfer code, ImageNet classification heads, dataset download logic,
+experiment notebooks, caches, checkpoints, reports, and generated results. A
+component is described as implemented when the repository contains an executable
+data path. A component is described as tested only when a unit test exercises its
+defining behavior. Full-dataset accuracy and robustness remain experiment-level
+questions.
+
+The published change set was validated with
+\begin{lstlisting}[language=bash]
+PYTHONPATH=src /home/dfli/anaconda3/envs/partviz/bin/python -m pytest -q
+\end{lstlisting}
+and produced \code{80 passed}.
+
+\section{Architectural Claim}
+
+The implemented system is a recurrent, attributed, multi-slot \AOG{} whose
+terminal alphabet is supplied by Stage 1. It has five principal layers:
+
+\begin{enumerate}[leftmargin=*]
+  \item Stage-1 alpha evidence: visible masks, scores, appearance tokens,
+  geometry, uncertainty, optional amodal support, and ports.
+  \item Native multi-slot object grammar: reusable part categories are separated
+  from object-template addresses.
+  \item Bottom-up beta parsing: distinct physical terminals are bound to distinct
+  slots, with pose, relation, and complexity terms.
+  \item Top-down gamma inference: missing or weak slots generate spatial image
+  queries grounded by class-slot geometry and sibling relations.
+  \item Structure and scene layers: object hypotheses are reused for scene
+  parsing, while motifs and branches are controlled by support, gain, complexity,
+  and held-out validation.
+\end{enumerate}
+
+Two invariants define the implementation:
+
+\begin{quote}
+A graph prior may create an expected or amodal region, but only image-supported
+alpha evidence may create a visible terminal.
+\end{quote}
+
+\begin{quote}
+At least one hypothesis per candidate class is retained before calibration and
+ABG; duplicate local beams from one class may not erase competing classes early.
+\end{quote}
+
+\section{Native Grammar}
+
+The materialized hierarchy is
+\begin{lstlisting}
+root_scene OR
+  -> object_class AND
+       -> object_pose AND
+            -> pursued_motif AND (optional)
+                 -> functional_slot OR
+                      -> slot_template AND
+                           -> slot_terminal
+                      -> absent slot terminal
+            -> remaining functional_slot OR ...
+\end{lstlisting}
+
+The reusable category \code{wheel} is not itself an object address. A bicycle may
+have \code{wheel:0} and \code{wheel:1}; these slots can bind two physical wheel
+terminals. The assignment state prevents one terminal identifier from satisfying
+both slots.
+
+The native graph stores OR, AND, and terminal nodes; OR-selection, AND-composition,
+and termination rules; branch priors; required and optional children; relation
+factors; geometric constraints; and per-node or per-rule complexity costs.
+
+\section{Evidence Representation}
+
+\subsection{Terminal packets}
+
+A terminal packet contains
+\begin{align*}
+t_i = (&\,\text{id},\text{part},M_i^{vis},s_i^{vis},B_i^{vis},
+M_i^{am},s_i^{am},B_i^{am},\\
+&z_i^{app},z_i^{func},z_i^{geom},\mathcal{P}_i,u_i,
+\text{source},\text{acceptance},\text{audit}).
+\end{align*}
+
+Here $\mathcal{P}_i$ is a set of typed ports. The visible and amodal channels are
+separate. Provenance records whether evidence came from global alpha, gamma
+re-query, or graph prior.
+
+\subsection{Evidence ledger}
+
+The ledger stores every alpha terminal, graph-prior request, accepted and rejected
+re-query result, superseded terminal, uncertainty, hallucination risk, and audit
+flag. A graph prior is recorded without a visible terminal identifier. A re-query
+may inherit semantic tokens from the weak terminal it refines, but visible
+acceptance must be independently established from the image crop.
+
+\subsection{Gamma queries}
+
+A query specifies target part and slot, source class/pose/hypothesis, normalized
+ROI, expected visible and amodal regions, posterior support, priority, neighboring
+terminal identifiers, relation context, and expected ports. These fields make the
+top-down request spatial and auditable rather than a class-label hint.
+
+\section{Offline Structure Construction}
+
+\subsection{Physical terminalization}
+
+Disconnected mask components are split first. A connected response may be split
+only when it has multiple spatial lobes. The connected splitter collapses flat
+peak plateaus before non-maximum suppression and peak-seeded spatial k-means; a
+flat binary component therefore remains one terminal. Child terminals receive new
+identifiers and parent audit flags.
+
+This is a conservative fallback, not a learned instance head. A featureless
+connected mask containing two physical instances remains fundamentally ambiguous.
+
+\subsection{Reusable part vocabulary}
+
+The multi-slot bank stores shared and class-conditioned prototypes for every part
+category. A prototype contains occurrence rate, support, token mean, token
+support, and a small functional subpart ontology. Examples include hub/rim/contact
+for wheels and root/surface/tip for wings. These semantic labels summarize port
+evidence; they are not claimed as independently supervised subpart masks.
+
+\subsection{Slot discovery}
+
+For each class $c$ and part $p$, the system observes physical terminal counts per
+training image. Multiplicity is estimated from the mean and an upper quantile,
+capped by a configured maximum. Normalized geometry
+\[
+g(t)=[c_x,c_y,w,h]
+\]
+is clustered with deterministic farthest-initialized k-means. Clusters that fail
+observation support, image support, or rate thresholds are removed.
+
+Each retained slot stores geometry mean/variance, token prototype, rate,
+requiredness, and class diagnosticity
+\[
+d_{c,s}=\operatorname{clip}\left(
+\log\frac{p(s\mid c)+\epsilon}{p(s)+\epsilon}
+\right).
+\]
+
+Requiredness is zero below a configurable occurrence threshold and rises toward
+one above it. This separates optional absent branches from missing required parts.
+
+\subsection{Horizontal relations and ports}
+
+Training records are parsed under their ground-truth class. Co-active slot pairs
+with sufficient support define relation means, variances, support, and reliability.
+For observed relation vector $x$,
+\[
+R_{ij}(x)=\rho_{ij}\exp\left[
+-\frac{1}{2}\operatorname{clip}\left(
+\frac{1}{D}\sum_d\frac{(x_d-\mu_{ij,d})^2}{\sigma^2_{ij,d}},0,4
+\right)\right].
+\]
+
+An optional port residual is added only when both terminals carry learned
+heatmap-backed ports. Geometry-derived ports remain an explicit fallback and do
+not masquerade as learned evidence.
+
+\subsection{Pose OR alternatives}
+
+Pose features concatenate matched slot geometries in a fixed class-specific slot
+order, using zeros for missing slots. Candidate cluster counts are accepted only
+when all clusters meet minimum support and class fraction, relative reconstruction
+gain exceeds a threshold, and an MDL-style criterion improves:
+\[
+J(K)=\log(\operatorname{MSE}_K)+\lambda_{pose}K.
+\]
+Balanced clustering and support gates prevent a single outlier from becoming a
+pose branch.
+
+\subsection{Learned candidate calibration}
+
+The class calibrator operates on standardized slot, vocabulary, relation, motif,
+missing, extra, and coverage features:
+\[
+S_{cal}(c\mid I)=b_c+\sum_k w_k
+\frac{f_k(I,c)-\mu_k}{\sigma_k}.
+\]
+
+Weights for physically positive terms are constrained positive via softplus;
+weights for missing, extra, and motif-violation terms are constrained negative.
+This prevents correlated training features from learning the pathological rule
+that missing evidence helps a class or matched evidence hurts it.
+
+\subsection{Motif pursuit and graph compression}
+
+The practical structure learner performs a Viterbi E-step over best slot
+assignments, counts co-active slot itemsets, and accepts a block $B$ when
+\[
+G(B)=n_B\log\frac{p(B)+\epsilon}
+{\prod_{s\in B}p(s)+\epsilon}-\lambda C(B)>0
+\]
+subject to support and prior thresholds. A minimum per-class reservation is made
+before the remaining global complexity budget is filled. Overlapping blocks are
+merged only when the union is itself observed and has competitive penalized gain.
+
+Accepted non-overlapping blocks become native reusable AND nodes. Graph
+compaction then prunes weak OR rules, removes unreachable nodes and rules, and
+merges exact equivalent terminal subgraphs while retaining class- and
+pose-conditioned attributes.
+
+This is a practical Viterbi/EM-style pursuit. It is not a claim of globally
+optimal latent-structure EM convergence.
+
+\section{Bottom-Up Parsing}
+
+For every class independently, slots are ordered by requiredness and support.
+Each slot explores candidate terminal bindings and an absent or unresolved branch.
+A terminal id already used by the partial state cannot be reused. Beam states are
+ranked within the class. Retained states define active/absent and assignment
+marginals.
+
+The terminal-slot score is approximately
+\[
+S_{slot}(s,t)=e(t)\left[w_gG(s,t)+w_z\max(0,Z(s,t))\right]
++e(t)d_{c,s},
+\]
+where $e(t)$ is visible evidence plus a bounded optional amodal contribution,
+$G$ is geometry compatibility, and $Z$ is token cosine similarity.
+
+Class-diverse pruning groups hypotheses by class, keeps one or more best states per
+class, and only then applies candidate-class or final top-$K$ limits. Pose and
+calibration wrappers preserve this ordering. This directly fixes duplicate-beam
+global pruning.
+
+\section{Recursive Alpha--Beta--Gamma Inference}
+
+\subsection{Belief state}
+
+At the implemented class/slot level,
+\begin{align*}
+\alpha_s^{(r)} &= \text{local terminal-to-slot alpha evidence},\\
+\beta_s^{(r)} &= \text{bottom-up slot composition evidence},\\
+\gamma_s^{(r)} &= p(c\mid I)\max(0.05,\operatorname{requiredness}(s)),\\
+b_s^{(r)} &= \sigma\left(
+w_\alpha\alpha_s^{(r)}+w_\beta\beta_s^{(r)}+w_\gamma\gamma_s^{(r)}
+\right).
+\end{align*}
+
+Class posterior is computed over the best retained score for each class, not over
+duplicate beams. The implementation records every slot's alpha, beta, gamma,
+belief, expected region, matched terminal, visibility, and reason.
+
+This is operational class/slot recurrence. It is not a generic exact
+inside-outside algorithm over every arbitrary native graph node.
+
+\subsection{Spatial gamma prediction}
+
+For a weak matched slot, the observed partial box anchors the query. For a missing
+slot, the engine selects the most reliable matched sibling relation, transforms the
+class slot mean relative to the observed anchor, and falls back to the class mean
+when no relation anchor exists. The query ROI expands the predicted part box.
+
+Query priority is
+\[
+P(q)=p(c\mid I)\,\operatorname{need}(s)\,
+\max(0.1,1-\alpha_s).
+\]
+Part of the budget is reserved for distinct candidate classes before remaining
+queries are assigned to additional slots from high-posterior hypotheses.
+
+\subsection{Image-backed re-query}
+
+The ROI head consumes an image crop, part embedding, expected mask, and optional
+context map. It predicts visible and amodal masks, presence scores, port heatmaps,
+uncertainty, and a normalized token. Masks are projected from ROI-local coordinates
+to a normalized image canvas.
+
+The checkpoint loader enforces an evidence contract. Required held-out metrics
+include presence F1, visible IoU, negative visible score, acceptance on black,
+white, and noise crops, fully occluded visible false-positive rate, and fully
+occluded amodal recall. Unvalidated checkpoints are rejected by default.
+
+\subsection{Hallucination and merge safeguards}
+
+Visible acceptance requires local image evidence. Gates inspect predicted mask
+area, uncertainty, image texture, edge energy, same-part duplicate overlap, and
+the checkpoint's supervised heads. Amodal-only support remains occluded. Accepted
+partial refinements supersede their weak source terminal instead of creating a
+duplicate.
+
+A re-query batch that changes class is transactionally rejected by default.
+Optional class switching requires a score gain, source-class consistency, and a
+minimum amount of visible evidence. The loop stops on no queries, unavailable
+image/Stage 1, small entropy change, or maximum rounds.
+
+\section{Visibility and Occlusion}
+
+The visibility state space is
+\[
+\{\text{visible},\text{partial},\text{occluded},\text{truncated},
+\text{absent},\text{unresolved}\}.
+\]
+
+Visible and amodal masks are stored separately. A layer state can additionally
+record occluder id, layer depth, occlusion boundary, and confidence. The current
+object parser supports amodal-only terminals as occluded structural evidence, but
+the branch does not claim a jointly learned depth-order or occluder model.
+
+\section{ROI Training}
+
+The ROI dataset uses cached records with embedded images or an indexed image
+provider. It constructs positive queries, wrong-part negatives, background
+negatives, synthetic blank/white/noise negatives, partial occlusion, full
+occlusion, expected masks, pseudo-port heatmaps, and optional token targets.
+
+The training loss is
+\begin{align*}
+\mathcal{L}_{ROI}={}&
+\lambda_{vb}\mathcal{L}_{vis\_BCE}+
+\lambda_{vd}\mathcal{L}_{vis\_Dice}+
+\lambda_{ab}\mathcal{L}_{amodal\_BCE}+
+\lambda_{ad}\mathcal{L}_{amodal\_Dice}\\
+&+\lambda_p\mathcal{L}_{presence}+
+\lambda_{ap}\mathcal{L}_{amodal\_presence}+
+\lambda_z\mathcal{L}_{token}+
+\lambda_o\mathcal{L}_{port}+
+\lambda_u\mathcal{L}_{uncertainty}.
+\end{align*}
+
+Full synthetic occlusion uses zero visible presence but positive amodal presence.
+This teaches the model not to report an occluded part as visible merely because an
+expected mask was provided.
+
+\section{Multi-Object Scene Parsing}
+
+Object hypotheses are reused as scene terminals. The scene parser generates
+whole-set and spatially clustered subsets, normalizes candidate subsets to object
+coordinates, parses each subset, and performs beam set-packing over disjoint
+terminal ownership. Candidate utility includes object posterior, covered evidence,
+object-count cost, and duplicate-class cost. Residual unexplained terminals are
+penalized.
+
+Ownership is a soft posterior over all candidate objects containing a terminal,
+not merely a greedy one-hot tag. Outputs include object class, object box, score,
+posterior, utility, terminal ids, ownership, residual terminals, candidate count,
+and ownership entropy.
+
+The implementation includes a synthetic two-object benchmark measuring object
+count, class multiset, terminal ownership, class recall, and residual evidence. It
+does not claim a fully learned scene-layout grammar or differentiable joint
+instance segmentation model.
+
+\section{Semi-Supervised Expansion}
+
+Low-score parses are inspected for recurring unexplained part evidence. Candidate
+branches must satisfy gain and structural consistency thresholds. When held-out
+records are supplied, the grammar is copied before expansion and rolled back when
+validation accuracy decreases beyond tolerance. Without held-out validation, the
+result is explicitly marked unvalidated.
+
+\section{Key Corrections}
+
+\begin{longtable}{p{0.39\textwidth}p{0.55\textwidth}}
+\toprule
+Previous failure or naive design & Implemented correction \\
+\midrule
+\endhead
+Part category treated as one object slot & Class/part/slot bank with distinct physical assignments and no terminal reuse. \\
+Global top-$K$ filled by duplicate beams & Per-class hypothesis retention before pose, calibration, ABG, and final pruning. \\
+Class and pose ids lost at AND nodes & Attribute propagation through both OR and AND chart states. \\
+Generic or full-image gamma request & Slot-mean or relation-aligned ROI with an ROI-local expected mask. \\
+Prior could appear as visible evidence & Evidence ledger and independent visible/amodal acceptance. \\
+Re-query duplicated an existing part & Same-part IoU gate and weak-terminal supersession. \\
+Re-query self-confirmed another class & Transactional class-switch guard. \\
+Random ROI head used as trained evidence & Checkpoint contract and held-out metric gates. \\
+Unconstrained calibration had wrong signs & Monotonic sign constraints on semantic feature groups. \\
+Relations became the classifier & Support/reliability gates, bounded score, normalized residual, explicit scale. \\
+Outlier-only pose branches & Balanced clusters, minimum support/fraction, gain, and MDL penalty. \\
+Motif budget consumed by early classes & Per-class reservation before global fill. \\
+Arbitrary motif merges & Require an observed union with competitive penalized gain. \\
+Flat masks fragmented by peak detection & Peak-plateau collapse before connected-lobe clustering. \\
+Unsupervised amodal/port outputs consumed & Enable optional heads only when checkpoint contract marks them supervised. \\
+\bottomrule
+\end{longtable}
+
+\section{Parameters and Interpretation}
+
+\begin{longtable}{p{0.25\textwidth}p{0.13\textwidth}p{0.54\textwidth}}
+\toprule
+Parameter & Default/start & Interpretation \\
+\midrule
+\endhead
+\code{visible\_tau} & 0.55 & Full-visible threshold; lower values risk false visibility. \\
+\code{partial\_tau} & 0.25 & Weak evidence threshold for partial state. \\
+\code{amodal\_tau} & 0.65 & Amodal acceptance threshold. \\
+\code{amodal\_parse\_weight} & 0.25 & Bounded structural contribution of amodal-only evidence. \\
+\code{max\_slots\_per\_part} & 4--6 & Multiplicity cap; raise only with physical terminal evidence. \\
+\code{required\_tau} & 0.35 & Occurrence threshold for requiredness. \\
+\code{beam\_per\_class} & 48--64 & Assignment search width within a class. \\
+\code{class\_hyps\_per\_class} & 1 & Representatives kept before cross-class pruning. \\
+\code{top\_k} & 5 & Final class/parse candidates after calibration. \\
+\code{relation\_min\_support} & 6 & Reject poorly supported relation prototypes. \\
+\code{max\_rounds} & 3 & Maximum ABG iterations; begin experiments with one. \\
+\code{query\_budget} & 4 & Maximum gamma queries per round. \\
+\code{gamma\_diverse\_class\_reserve} & 2 & Reserve queries for competing classes. \\
+\code{gamma\_roi\_expand} & 1.35 & Expand predicted part region for ROI search. \\
+\code{requery\_duplicate\_iou} & 0.45 & Same-part duplicate rejection threshold. \\
+ROI \code{min\_accept\_score} & 0.85 & Conservative checkpoint wrapper acceptance. \\
+\code{max\_poses\_per\_class} & 2--4 & Pose branch cap with support and MDL gates. \\
+\code{max\_blocks} & 32 & Global motif complexity budget with class coverage. \\
+\code{max\_block\_size} & 4 & Largest pursued motif itemset. \\
+\bottomrule
+\end{longtable}
+
+\section{Stage Outputs and Failure Signatures}
+
+\begin{longtable}{p{0.19\textwidth}p{0.33\textwidth}p{0.40\textwidth}}
+\toprule
+Stage & Reasonable output & Unreasonable output and likely cause \\
+\midrule
+\endhead
+Stage-1 cache & Local masks, varied scores, repeated physical terminals, consistent tokens & Empty masks with high scores, merged repeated parts, mixed token dimensions \\
+Instance split & Separate components/lobes, flat masks preserved & Many fragments from one flat component \\
+Slot bank & Variable multiplicity with broad support & One slot everywhere or cap saturation \\
+Relations & Supported, reliable edges with positive residual value & Relations hurt no-relation baseline or act as class prior \\
+Pose bank & Supported alternatives with reconstruction gain & Tiny outlier pose branches \\
+Parse forest & Several unique classes and high true-class candidate recall & Duplicate beams from one class fill top-$K$ \\
+Calibrator & Presence/match positive; missing/extra negative & Wrong feature signs or one dominant pathological term \\
+Gamma & Slot-specific ROIs from several candidates & Full-image or repeated identical queries \\
+ROI re-query & Low false acceptance; useful accepted evidence & Blank/noise accepted or zero executed queries \\
+ABG trace & Accepted queries improve margin, entropy, or slot state & Query count without execution; entropy rises systematically \\
+Scene parse & Disjoint objects, calibrated ownership, low residual & Duplicate objects reuse terminals \\
+Structure search & Positive net gain and stable validation & Graph growth without likelihood or validation benefit \\
+\bottomrule
+\end{longtable}
+
+\section{Required Experimental Protocol}
+
+The recommended sequence is:
+
+\begin{enumerate}[leftmargin=*]
+  \item audit Stage-1 terminal masks, tokens, multiplicity, and physical instances;
+  \item run unary multi-slot parsing with relations, poses, motifs, and ABG off;
+  \item verify class-diverse candidate recall and unique class count;
+  \item train the sign-constrained calibrator and audit every feature weight;
+  \item sweep a small relation residual and retain it only if neutral or positive;
+  \item evaluate supported pose alternatives independently;
+  \item pursue/materialize motifs and compare validation versus graph complexity;
+  \item train the ROI head with positive, negative, partial, and full-occlusion data;
+  \item require the ROI checkpoint contract to pass;
+  \item run one real image-backed ABG round and measure before/after utility;
+  \item add recurrence only if one round is beneficial and hallucination remains low;
+  \item evaluate controlled occlusion and synthetic multi-object scenes;
+  \item run validation-gated semi-supervised expansion last.
+\end{enumerate}
+
+Every run should report classification and per-class metrics, candidate recall,
+unique classes, parse entropy, slot multiplicity and missingness, relation
+coverage, pose support, motif gain, graph size, query execution and acceptance,
+hallucination rate, before/after ABG effects, and scene ownership metrics.
+
+\section{Implementation and Test Map}
+
+\begin{longtable}{p{0.37\textwidth}p{0.57\textwidth}}
+\toprule
+Module & Responsibility \\
+\midrule
+\endhead
+\path{abg_aog_v7/types.py} & Evidence, grammar, parse, visibility, query, and ledger contracts. \\
+\path{abg_aog_v7/multislot_native.py} & Slot/vocabulary discovery, relations, parser, native grammar materialization. \\
+\path{abg_aog_v7/class_diverse_parser.py} & Per-class pre-pruning and class-diverse candidate retention. \\
+\path{abg_aog_v7/grammar.py} & Native graph construction, validation, persistence. \\
+\path{abg_aog_v7/chart_parser.py} & Generic bounded OR/AND/terminal parsing. \\
+\path{abg_aog_v7/abg_recursive.py} & Recursive class/slot beliefs, grounded gamma scheduling, merge guards. \\
+\path{abg_aog_v7/roi_requery_head.py} & Lightweight neural crop alpha module. \\
+\path{abg_aog_v7/queryable_stage1.py} & Image-backed re-query, mask projection, acceptance and audit. \\
+\path{abg_aog_v7/roi_training.py} & ROI dataset, synthetic occlusion/negatives, losses, training, evaluation. \\
+\path{abg_aog_v7/complete_extensions.py} & ROI contract, poses, scene parser, motifs, connected splitting. \\
+\path{abg_aog_v7/complete_extensions_integrated.py} & Class-diverse pose/calibration integration and sign constraints. \\
+\path{abg_aog_v7/graph_compact.py} & Rule/node pruning and exact-subgraph merging. \\
+\path{abg_aog_v7/semisup_loop.py} & Data-driven branch proposals and validation rollback. \\
+\bottomrule
+\end{longtable}
+
+Tests cover repeated slots, class-diverse pruning, gamma query generation, ROI
+alignment and negative supervision, visible/amodal separation, empty-mask and
+uniform-crop rejection, duplicate rejection, partial replacement, checkpoint
+validation, class-switch rejection, connected splitting, calibrator isolation,
+pose outlier rejection, motif materialization, graph pruning, scene ownership,
+shared vocabulary, synthetic scene metrics, and amodal-only occluded support.
+
+\section{Limitations and Non-Claims}
+
+\begin{enumerate}[leftmargin=*]
+  \item No trained ROI checkpoint is shipped. Real recurrence requires a checkpoint
+  that passes the evidence contract.
+  \item The global PartImageNet Stage 1 is not replaced or jointly optimized with
+  all graph components in this branch.
+  \item ABG recurrence is implemented at the practical class/slot level, not as an
+  exact generic inside-outside solver over every graph node.
+  \item Pose labels are not supervised; pose branches are geometry clusters.
+  \item Semantic subparts summarize port evidence and are not fully supervised
+  subpart segmentations.
+  \item Connected-blob splitting is heuristic and cannot resolve evidence-free
+  instance ambiguity.
+  \item Scene parsing is object-hypothesis set-packing, not a learned rich scene
+  layout grammar with end-to-end depth reasoning.
+  \item Motif pursuit is practical Viterbi/EM-style search, not a global structure
+  optimum.
+  \item Optional modules require controlled ablation and multi-seed validation.
+  \item ImageNet adaptation and its results are explicitly outside this branch.
+\end{enumerate}
+
+\section{Next Milestone}
+
+The next milestone should be a separate reproducible PartImageNet experiment
+package that consumes this branch as a library. It should generate instance-aware
+terminal caches, train and validate the ROI checkpoint, build slot/pose/relation/
+motif/calibrator artifacts, run unary and structured ablations, evaluate real
+image-backed recurrence and controlled occlusion, measure synthetic and real
+multi-object ownership, and report multi-seed mean and standard deviation. Only
+components that pass the explicit success gates should be promoted into the final
+model configuration.
+
+\end{document}

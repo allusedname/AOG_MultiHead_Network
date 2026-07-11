@@ -146,6 +146,7 @@ class OptionalDINOFeatureMap(nn.Module):
         weights_path: str = "",
         input_size: int = 224,
         freeze: bool = True,
+        pretrained: bool = True,
     ):
         super().__init__()
         self.enabled = bool(enabled)
@@ -158,7 +159,11 @@ class OptionalDINOFeatureMap(nn.Module):
         try:
             import timm
 
-            self.model = timm.create_model(model_name, pretrained=not bool(weights_path), num_classes=0)
+            self.model = timm.create_model(
+                model_name,
+                pretrained=bool(pretrained and not weights_path),
+                num_classes=0,
+            )
             if weights_path:
                 weights = Path(weights_path)
                 if not weights.exists():

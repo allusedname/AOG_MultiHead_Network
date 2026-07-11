@@ -139,7 +139,10 @@ def response_from_terminal_records(records: list[dict[str, Any]], *, num_parts: 
             if part.numel() and bool(valid.any()):
                 max_part = max(max_part, int(part[valid].max().item()))
         num_parts = max_part + 1
-    R = torch.zeros(len(records), int(num_parts))
+    # This matrix is a CPU-side structure-learning statistic.  Keep it in
+    # float64 and remove float32 serialization noise so deterministic values
+    # such as 0.7 remain stable across cache dtypes and exact diagnostics.
+    R = torch.zeros(len(records), int(num_parts), dtype=torch.float64)
     for i, r in enumerate(records):
         part = torch.as_tensor(r.get("terminal_part", [])).long()
         score = torch.as_tensor(r.get("terminal_score", torch.ones_like(part).float())).float()
@@ -147,7 +150,8 @@ def response_from_terminal_records(records: list[dict[str, Any]], *, num_parts: 
         for t in torch.nonzero(valid, as_tuple=False).flatten().tolist():
             p = int(part[t].item())
             if 0 <= p < int(num_parts):
-                R[i, p] = max(float(R[i, p].item()), float(score[t].item()))
+                value = round(float(score[t].item()), 7)
+                R[i, p] = max(float(R[i, p].item()), value)
     return R.clamp(0, 1), [f"part_{i}" for i in range(int(num_parts))]
 
 
