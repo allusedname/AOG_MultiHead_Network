@@ -40,6 +40,9 @@ def test_multislot_bank_builds_repeated_slots_and_native_parse():
     assert forest.map_parse is not None
     assert forest.map_parse.class_id == 0
     assert sum(1 for s in forest.map_parse.slots if s.terminal_id is not None) >= 2
+    assert all(s.part_template_posterior is not None for s in forest.map_parse.slots)
+    assert all(s.assignment_posterior is not None for s in forest.map_parse.slots)
+    assert all(not s.subpart_assignments for s in forest.map_parse.slots)
     native = NativeChartParserV7(grammar, enable_relations=False).parse(terms)
     assert native.map_parse is not None
     assert native.map_parse.class_id is not None

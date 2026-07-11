@@ -24,16 +24,42 @@ def box_outside_fraction(box: tuple[float, float, float, float]) -> float:
     return float(max(0.0, min(1.0, 1.0 - inside / area)))
 
 
-def decide_visibility(*, alpha_score: float, gamma_support: float, expected_box: tuple[float, float, float, float], has_occluder: bool = False, cfg: V7NativeConfig | None = None) -> VisibilityDecisionV7:
+def decide_visibility(
+    *,
+    alpha_score: float,
+    gamma_support: float,
+    expected_box: tuple[float, float, float, float],
+    has_occluder: bool = False,
+    mask_fraction: float | None = None,
+    uncertainty: float | None = None,
+    amodal_score: float | None = None,
+    amodal_mask_fraction: float | None = None,
+    cfg: V7NativeConfig | None = None,
+) -> VisibilityDecisionV7:
     cfg = cfg or V7NativeConfig()
-    if float(alpha_score) >= float(cfg.visible_tau):
-        return VisibilityDecisionV7(VisibilityStateV7.VISIBLE, True, False, 0.0, "strong alpha evidence")
-    if float(alpha_score) >= float(cfg.partial_tau):
-        return VisibilityDecisionV7(VisibilityStateV7.PARTIAL, True, False, 0.05, "weak local alpha evidence")
+    accepted_amodal = bool(
+        amodal_score is not None
+        and float(amodal_score) >= float(cfg.amodal_tau)
+        and amodal_mask_fraction is not None
+        and float(amodal_mask_fraction) >= float(cfg.amodal_min_mask_fraction)
+    )
     if box_outside_fraction(expected_box) > 0.35:
-        return VisibilityDecisionV7(VisibilityStateV7.TRUNCATED, False, True, 0.0, "expected box crosses image boundary")
+        return VisibilityDecisionV7(VisibilityStateV7.TRUNCATED, False, accepted_amodal, 0.0, "expected box crosses image boundary")
+    if uncertainty is not None and float(uncertainty) > float(cfg.requery_max_uncertainty):
+        return VisibilityDecisionV7(VisibilityStateV7.UNRESOLVED, False, False, float(uncertainty), "ROI evidence is too uncertain")
+    if bool(cfg.requery_require_mask) and (mask_fraction is None or float(mask_fraction) < float(cfg.requery_min_mask_fraction)):
+        risk = min(1.0, max(0.0, float(gamma_support)))
+        if accepted_amodal:
+            return VisibilityDecisionV7(VisibilityStateV7.OCCLUDED, False, True, risk, "amodal alpha evidence without visible-mask support")
+        return VisibilityDecisionV7(VisibilityStateV7.UNRESOLVED, False, False, risk, "ROI score has no visible-mask support")
+    if float(alpha_score) >= float(cfg.visible_tau):
+        return VisibilityDecisionV7(VisibilityStateV7.VISIBLE, True, accepted_amodal, 0.0, "strong alpha evidence")
+    if float(alpha_score) >= float(cfg.partial_tau):
+        return VisibilityDecisionV7(VisibilityStateV7.PARTIAL, False, accepted_amodal, 0.05, "weak local alpha evidence")
     if has_occluder and float(gamma_support) > 0.0:
-        return VisibilityDecisionV7(VisibilityStateV7.OCCLUDED, False, True, 0.0, "graph expectation explained by occluder")
+        return VisibilityDecisionV7(VisibilityStateV7.OCCLUDED, False, accepted_amodal, 0.0, "graph expectation explained by occluder")
+    if accepted_amodal:
+        return VisibilityDecisionV7(VisibilityStateV7.OCCLUDED, False, True, 0.05, "amodal alpha evidence without visible support")
     risk = min(1.0, max(0.0, float(gamma_support)))
     return VisibilityDecisionV7(VisibilityStateV7.UNRESOLVED, False, False, risk, "no alpha evidence and no occluder")
 

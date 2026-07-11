@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from .grammar import NativeGrammarV7
+from .port_bonds import PortOntologyV7, best_port_match, ensure_ports
 from .relations_calibrated import box_relation_vector
 from .terminal_adapter import terminal_packets_from_record
 from .types import (
@@ -42,6 +43,30 @@ def box_from_geom4(g: list[float] | tuple[float, ...] | torch.Tensor) -> tuple[f
     return (float(cx - 0.5 * w), float(cy - 0.5 * h), float(cx + 0.5 * w), float(cy + 0.5 * h))
 
 
+def terminal_evidence_score(
+    terminal: TerminalPacketV7,
+    *,
+    amodal_weight: float = 0.25,
+) -> float:
+    if terminal.accepted_visible:
+        return max(0.0, float(terminal.visible_score))
+    if terminal.accepted_amodal:
+        return max(0.0, float(amodal_weight) * float(terminal.amodal_score))
+    return 0.0
+
+
+def terminal_evidence_box(
+    terminal: TerminalPacketV7,
+) -> tuple[float, float, float, float]:
+    if (
+        not terminal.accepted_visible
+        and terminal.accepted_amodal
+        and terminal.amodal_box_xyxy is not None
+    ):
+        return terminal.amodal_box_xyxy
+    return terminal.visible_box_xyxy
+
+
 def safe_log_ratio(a: float, b: float, *, clip: float = 2.5) -> float:
     return float(torch.log(torch.tensor((float(a) + 1e-4) / (float(b) + 1e-4))).clamp(-float(clip), float(clip)).item())
 
@@ -50,6 +75,66 @@ def norm_token(t: torch.Tensor | None) -> torch.Tensor | None:
     if t is None or not torch.is_tensor(t) or t.numel() == 0:
         return None
     return F.normalize(t.detach().float().flatten().cpu(), dim=0)
+
+
+def semantic_subparts_for_part(part_name: str) -> list[str]:
+    """Small functional ontology shared by classes using the same part name."""
+    name = str(part_name).strip().lower()
+    if any(word in name for word in ("wheel", "tire")):
+        return ["hub", "rim", "ground_contact", "attachment"]
+    if any(word in name for word in ("wing", "fin")):
+        return ["root", "surface", "tip", "leading_boundary"]
+    if any(word in name for word in ("leg", "foot", "paw", "hand", "arm")):
+        return ["root", "joint", "tip", "contact"]
+    if any(word in name for word in ("head", "beak", "snout")):
+        return ["center", "boundary", "body_attachment"]
+    if any(word in name for word in ("tail", "neck")):
+        return ["root", "axis", "tip"]
+    if any(word in name for word in ("body", "torso", "frame")):
+        return ["center", "left_attachment", "right_attachment", "top_attachment", "bottom_attachment"]
+    return ["center", "boundary", "attachment"]
+
+
+def semantic_subpart_evidence(
+    slot: "MultiSlotTemplateV7",
+    terminal: TerminalPacketV7,
+) -> tuple[list[str], list[float]]:
+    aliases = {
+        "center": {"center", "hub"},
+        "hub": {"hub", "center"},
+        "rim": {"rim", "boundary"},
+        "ground_contact": {"contact", "bottom"},
+        "contact": {"contact", "bottom"},
+        "attachment": {"attach", "root"},
+        "body_attachment": {"attach", "root"},
+        "left_attachment": {"left", "attach"},
+        "right_attachment": {"right", "attach"},
+        "top_attachment": {"top", "attach"},
+        "bottom_attachment": {"bottom", "attach", "contact"},
+        "root": {"root", "attach"},
+        "tip": {"tip"},
+        "joint": {"center", "attach"},
+        "surface": {"center"},
+        "leading_boundary": {"boundary", "top"},
+        "boundary": {"boundary", "left", "right", "top", "bottom", "rim"},
+        "axis": {"center", "root", "tip"},
+    }
+    labels: list[str] = []
+    scores: list[float] = []
+    for label in slot.semantic_subparts:
+        candidates = aliases.get(label, {label})
+        confidence = max(
+            (
+                float(port.confidence)
+                for port in terminal.ports
+                if str(port.port_type) in candidates
+            ),
+            default=0.0,
+        )
+        if confidence > 0.0:
+            labels.append(str(label))
+            scores.append(confidence)
+    return labels, scores
 
 
 def choose_num_slots(per_image_counts: list[int], total_obs: int, num_images: int, max_slots: int) -> int:
@@ -106,6 +191,21 @@ class MultiSlotTemplateV7:
     geom_var: list[float]
     token_mean: list[float] = field(default_factory=list)
     token_support: int = 0
+    shared_vocabulary_id: int | None = None
+    semantic_subparts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PartVocabularyPrototypeV7:
+    vocabulary_id: int
+    part_id: int
+    part_name: str
+    class_id: int | None
+    support_images: int
+    rate: float
+    token_mean: list[float] = field(default_factory=list)
+    token_support: int = 0
+    semantic_subparts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +227,8 @@ class MultiSlotBankV7:
     part_names: list[str]
     slots: list[MultiSlotTemplateV7]
     relations: list[MultiSlotRelationV7] = field(default_factory=list)
+    class_part_prototypes: list[PartVocabularyPrototypeV7] = field(default_factory=list)
+    shared_part_prototypes: list[PartVocabularyPrototypeV7] = field(default_factory=list)
     global_part_rate: dict[int, float] = field(default_factory=dict)
     cfg: dict[str, Any] = field(default_factory=dict)
 
@@ -139,6 +241,14 @@ class MultiSlotBankV7:
         self.relations_by_class: dict[int, list[MultiSlotRelationV7]] = defaultdict(list)
         for r in self.relations:
             self.relations_by_class[int(r.class_id)].append(r)
+        self.class_part_by_key = {
+            (int(proto.class_id), int(proto.part_id)): proto
+            for proto in self.class_part_prototypes
+            if proto.class_id is not None
+        }
+        self.shared_part_by_id = {
+            int(proto.part_id): proto for proto in self.shared_part_prototypes
+        }
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -147,6 +257,8 @@ class MultiSlotBankV7:
             "part_names": list(self.part_names),
             "slots": [asdict(s) for s in self.slots],
             "relations": [asdict(r) for r in self.relations],
+            "class_part_prototypes": [asdict(proto) for proto in self.class_part_prototypes],
+            "shared_part_prototypes": [asdict(proto) for proto in self.shared_part_prototypes],
             "global_part_rate": {int(k): float(v) for k, v in self.global_part_rate.items()},
             "cfg": dict(self.cfg),
         }
@@ -158,6 +270,14 @@ class MultiSlotBankV7:
             part_names=list(payload.get("part_names", [])),
             slots=[MultiSlotTemplateV7(**s) for s in payload.get("slots", [])],
             relations=[MultiSlotRelationV7(**r) for r in payload.get("relations", [])],
+            class_part_prototypes=[
+                PartVocabularyPrototypeV7(**proto)
+                for proto in payload.get("class_part_prototypes", [])
+            ],
+            shared_part_prototypes=[
+                PartVocabularyPrototypeV7(**proto)
+                for proto in payload.get("shared_part_prototypes", [])
+            ],
             global_part_rate={int(k): float(v) for k, v in payload.get("global_part_rate", {}).items()},
             cfg=dict(payload.get("cfg", {})),
         )
@@ -181,6 +301,8 @@ def build_multislot_bank_from_records(
     max_slots_per_part: int = 6,
     required_tau: float = 0.35,
     min_slot_support: int = 3,
+    min_slot_support_images: int = 3,
+    min_slot_rate: float = 0.03,
     min_relation_support: int = 6,
 ) -> MultiSlotBankV7:
     obs_by_cp: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
@@ -200,6 +322,68 @@ def build_multislot_bank_from_records(
         global_part_img.update(parts_seen)
     n_all = max(1, len(labeled_records))
     global_rate = {int(p): (float(c) + 1.0) / (n_all + 2.0) for p, c in global_part_img.items()}
+    class_part_prototypes: list[PartVocabularyPrototypeV7] = []
+    shared_obs: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    vocabulary_id = 0
+    for (class_id, part_id), obs in sorted(obs_by_cp.items()):
+        best_by_image: dict[int, dict[str, Any]] = {}
+        for row in obs:
+            sample_id = int(row["sample_id"])
+            if sample_id not in best_by_image or float(row["score"]) > float(best_by_image[sample_id]["score"]):
+                best_by_image[sample_id] = row
+        selected = list(best_by_image.values())
+        shared_obs[int(part_id)].extend(selected)
+        tokens = [row["token"] for row in selected if row["token"] is not None]
+        token_mean = []
+        if tokens:
+            token_mean = [
+                float(value)
+                for value in F.normalize(torch.stack(tokens).mean(0), dim=0).tolist()
+            ]
+        part_name = part_names[part_id] if 0 <= part_id < len(part_names) else f"part_{part_id}"
+        class_part_prototypes.append(
+            PartVocabularyPrototypeV7(
+                vocabulary_id=vocabulary_id,
+                part_id=int(part_id),
+                part_name=part_name,
+                class_id=int(class_id),
+                support_images=len(selected),
+                rate=(len(selected) + 1.0) / (max(1, int(class_counts[class_id])) + 2.0),
+                token_mean=token_mean,
+                token_support=len(tokens),
+                semantic_subparts=semantic_subparts_for_part(part_name),
+            )
+        )
+        vocabulary_id += 1
+    shared_part_prototypes: list[PartVocabularyPrototypeV7] = []
+    for part_id, rows in sorted(shared_obs.items()):
+        best_by_image: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            sample_id = int(row["sample_id"])
+            if sample_id not in best_by_image or float(row["score"]) > float(best_by_image[sample_id]["score"]):
+                best_by_image[sample_id] = row
+        selected = list(best_by_image.values())
+        tokens = [row["token"] for row in selected if row["token"] is not None]
+        token_mean = []
+        if tokens:
+            token_mean = [
+                float(value)
+                for value in F.normalize(torch.stack(tokens).mean(0), dim=0).tolist()
+            ]
+        part_name = part_names[part_id] if 0 <= part_id < len(part_names) else f"part_{part_id}"
+        shared_part_prototypes.append(
+            PartVocabularyPrototypeV7(
+                vocabulary_id=int(part_id),
+                part_id=int(part_id),
+                part_name=part_name,
+                class_id=None,
+                support_images=len(selected),
+                rate=(len(selected) + 1.0) / (n_all + 2.0),
+                token_mean=token_mean,
+                token_support=len(tokens),
+                semantic_subparts=semantic_subparts_for_part(part_name),
+            )
+        )
     slots: list[MultiSlotTemplateV7] = []
     slot_uid = 0
     for (class_id, part_id), obs in sorted(obs_by_cp.items()):
@@ -217,6 +401,8 @@ def build_multislot_bank_from_records(
             rows = [obs[i] for i in idx]
             support_images = len(set(int(r["sample_id"]) for r in rows))
             rate = (support_images + 1.0) / (n_cls + 2.0)
+            if support_images < int(min_slot_support_images) or rate < float(min_slot_rate):
+                continue
             gr = float(global_rate.get(part_id, 1.0 / max(2, len(part_names))))
             requiredness = max(0.0, min(1.0, (rate - required_tau) / max(1e-6, 1.0 - required_tau))) if rate >= required_tau else 0.0
             diagnostic = safe_log_ratio(rate, gr)
@@ -242,11 +428,40 @@ def build_multislot_bank_from_records(
                 geom_var=[float(x) for x in G.var(0, unbiased=False).clamp_min(0.01).tolist()],
                 token_mean=token_mean,
                 token_support=len(toks),
+                shared_vocabulary_id=int(part_id),
+                semantic_subparts=semantic_subparts_for_part(
+                    part_names[part_id] if 0 <= part_id < len(part_names) else f"part_{part_id}"
+                ),
             ))
             slot_uid += 1
-    bank = MultiSlotBankV7(class_names=list(class_names), part_names=list(part_names), slots=slots, global_part_rate=global_rate, cfg={"score_tau": score_tau, "max_slots_per_part": max_slots_per_part, "required_tau": required_tau, "min_slot_support": min_slot_support, "min_relation_support": min_relation_support})
+    bank = MultiSlotBankV7(
+        class_names=list(class_names),
+        part_names=list(part_names),
+        slots=slots,
+        class_part_prototypes=class_part_prototypes,
+        shared_part_prototypes=shared_part_prototypes,
+        global_part_rate=global_rate,
+        cfg={
+            "score_tau": score_tau,
+            "max_slots_per_part": max_slots_per_part,
+            "required_tau": required_tau,
+            "min_slot_support": min_slot_support,
+            "min_slot_support_images": min_slot_support_images,
+            "min_slot_rate": min_slot_rate,
+            "min_relation_support": min_relation_support,
+        },
+    )
     relations = _estimate_slot_relations(records, bank, score_tau=score_tau, min_relation_support=min_relation_support)
-    bank = MultiSlotBankV7(class_names=list(class_names), part_names=list(part_names), slots=slots, relations=relations, global_part_rate=global_rate, cfg=bank.cfg)
+    bank = MultiSlotBankV7(
+        class_names=list(class_names),
+        part_names=list(part_names),
+        slots=slots,
+        relations=relations,
+        class_part_prototypes=class_part_prototypes,
+        shared_part_prototypes=shared_part_prototypes,
+        global_part_rate=global_rate,
+        cfg=bank.cfg,
+    )
     return bank
 
 
@@ -262,10 +477,10 @@ def build_multislot_bank_from_terminal_cache(cache_path: str | Path, *, out: str
     return bank
 
 
-def slot_term_score(slot: MultiSlotTemplateV7, term: TerminalPacketV7, *, token_weight: float = 0.35, geom_weight: float = 0.65) -> dict[str, float]:
+def slot_term_score(slot: MultiSlotTemplateV7, term: TerminalPacketV7, *, token_weight: float = 0.35, geom_weight: float = 0.65, amodal_weight: float = 0.25) -> dict[str, float]:
     if int(term.functional_part_id) != int(slot.part_id):
         return {"score": -1e9, "geom": 0.0, "token": 0.0}
-    obs = geom4(term.visible_box_xyxy)
+    obs = geom4(terminal_evidence_box(term))
     mu = torch.tensor(slot.geom_mean, dtype=torch.float32)
     var = torch.tensor(slot.geom_var if slot.geom_var else [0.08, 0.08, 0.08, 0.08], dtype=torch.float32).clamp_min(1e-3)
     geom_sim = float(torch.exp(-0.5 * torch.clamp((((obs - mu) ** 2) / var).mean(), max=4.0)).item()) if mu.numel() == obs.numel() else 0.0
@@ -275,7 +490,7 @@ def slot_term_score(slot: MultiSlotTemplateV7, term: TerminalPacketV7, *, token_
         tok = F.normalize(term.appearance_token.detach().float().flatten(), dim=0).cpu()
         if proto.numel() == tok.numel():
             token_sim = float(torch.dot(tok, F.normalize(proto, dim=0)).clamp(-1, 1).item())
-    match = float(term.visible_score) * (float(geom_weight) * geom_sim + float(token_weight) * max(0.0, token_sim))
+    match = terminal_evidence_score(term, amodal_weight=amodal_weight) * (float(geom_weight) * geom_sim + float(token_weight) * max(0.0, token_sim))
     return {"score": match, "geom": geom_sim, "token": token_sim}
 
 
@@ -287,15 +502,16 @@ def match_slots_beam(
     beam: int = 64,
     max_candidates_per_slot: int = 8,
     missing_weight: float = 1.25,
+    amodal_weight: float = 0.25,
 ) -> list[dict[str, Any]]:
     ordered = sorted(slots, key=lambda s: (-float(s.requiredness), -float(s.rate), int(s.part_id), int(s.slot_id)))
     candidates: dict[int, list[tuple[TerminalPacketV7, dict[str, float]]]] = {}
     for s in ordered:
         scored = []
         for t in terms:
-            if float(t.visible_score) < score_tau or int(t.functional_part_id) != int(s.part_id):
+            if terminal_evidence_score(t, amodal_weight=amodal_weight) < score_tau or int(t.functional_part_id) != int(s.part_id):
                 continue
-            sc = slot_term_score(s, t)
+            sc = slot_term_score(s, t, amodal_weight=amodal_weight)
             if sc["score"] > -1e8:
                 scored.append((t, sc))
         scored.sort(key=lambda x: x[1]["score"], reverse=True)
@@ -311,13 +527,31 @@ def match_slots_beam(
                 tid = int(t.terminal_id)
                 if tid in st["used"]:
                     continue
-                node = float(t.visible_score) * float(s.diagnostic)
+                node = terminal_evidence_score(t, amodal_weight=amodal_weight) * float(s.diagnostic)
                 slot_score = float(sc["score"] + node)
                 new_used = set(st["used"]); new_used.add(tid)
                 nxt.append({"score": st["score"] + slot_score, "used": new_used, "assignments": list(st["assignments"]) + [(s, t, sc)], "term_ids": list(st["term_ids"]) + [tid]})
         nxt.sort(key=lambda x: x["score"], reverse=True)
         states = nxt[: int(beam)]
     return states
+
+
+def slot_branch_marginals(states: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Return retained-beam marginals for active/absent and terminal assignments."""
+    if not states:
+        return {}
+    scores = torch.tensor([float(state["score"]) for state in states], dtype=torch.float32)
+    probs = torch.softmax(scores, dim=0).tolist()
+    out: dict[int, dict[str, Any]] = {}
+    for state, probability in zip(states, probs):
+        for slot, terminal, _ in state["assignments"]:
+            slot_uid = int(slot.slot_uid)
+            row = out.setdefault(slot_uid, {"active": 0.0, "assignment": defaultdict(float)})
+            terminal_id = None if terminal is None else int(terminal.terminal_id)
+            row["assignment"][terminal_id] += float(probability)
+            if terminal is not None:
+                row["active"] += float(probability)
+    return out
 
 
 def _estimate_slot_relations(records: list[dict[str, Any]], bank: MultiSlotBankV7, *, score_tau: float, min_relation_support: int) -> list[MultiSlotRelationV7]:
@@ -364,21 +598,35 @@ class NativeMultiSlotParserV7:
         self.top_k = int(top_k)
 
     def parse(self, terminals: list[TerminalPacketV7], *, sample_id: int = 0) -> ParseForestV7:
+        terminals = ensure_ports(
+            terminals,
+            PortOntologyV7.from_part_names(self.bank.part_names),
+            replace_geometry_fallback=True,
+        )
         hyps: list[ParseHypothesisV7] = []
         score_tau = float(self.bank.cfg.get("score_tau", 0.05))
         for cid, slots in sorted(self.bank.by_class.items()):
-            states = match_slots_beam(slots, terminals, score_tau=score_tau, beam=self.beam_per_class)
+            states = match_slots_beam(slots, terminals, score_tau=score_tau, beam=self.beam_per_class, amodal_weight=float(self.cfg.amodal_parse_weight))
+            marginals = slot_branch_marginals(states)
             for st in states[: max(1, self.top_k)]:
                 slot_assignments: list[SlotAssignmentV7] = []
                 relation_scores = self._relation_scores(cid, st["assignments"])
                 rel_score = sum(float(r.get("total_score", 0.0)) for r in relation_scores)
                 for s, t, sc in st["assignments"]:
+                    branch = marginals.get(int(s.slot_uid), {"active": 0.0, "assignment": {}})
+                    selected_key = None if t is None else int(t.terminal_id)
+                    assignment_posterior = float(branch["assignment"].get(selected_key, 0.0))
+                    template_posterior = float(branch["active"] if t is not None else 1.0 - branch["active"])
                     if t is None:
                         vis = VisibilityStateV7.ABSENT if float(s.requiredness) < 0.5 else VisibilityStateV7.UNRESOLVED
-                        slot_assignments.append(SlotAssignmentV7(slot_id=int(s.slot_uid), part_id=int(s.part_id), terminal_id=None, visibility=vis, score=float(sc["score"]), part_template_id=int(s.slot_uid), part_template_posterior=None, subpart_assignments=[int(s.slot_id)], port_assignments=[]))
+                        slot_assignments.append(SlotAssignmentV7(slot_id=int(s.slot_uid), part_id=int(s.part_id), terminal_id=None, visibility=vis, score=float(sc["score"]), part_template_id=int(s.slot_uid), part_template_posterior=template_posterior, assignment_posterior=assignment_posterior, subpart_assignments=[], port_assignments=[], port_assignment_scores=[]))
                     else:
-                        vis = VisibilityStateV7.VISIBLE if float(t.visible_score) >= float(self.cfg.visible_tau) else VisibilityStateV7.PARTIAL
-                        slot_assignments.append(SlotAssignmentV7(slot_id=int(s.slot_uid), part_id=int(s.part_id), terminal_id=int(t.terminal_id), visibility=vis, score=float(sc["score"]), part_template_id=int(s.slot_uid), part_template_posterior=None, subpart_assignments=[int(s.slot_id)], port_assignments=[(p.port_type, p.port_id) for p in t.ports]))
+                        if not t.accepted_visible and t.accepted_amodal:
+                            vis = VisibilityStateV7.OCCLUDED
+                        else:
+                            vis = VisibilityStateV7.VISIBLE if float(t.visible_score) >= float(self.cfg.visible_tau) else VisibilityStateV7.PARTIAL
+                        subpart_labels, subpart_scores = semantic_subpart_evidence(s, t)
+                        slot_assignments.append(SlotAssignmentV7(slot_id=int(s.slot_uid), part_id=int(s.part_id), terminal_id=int(t.terminal_id), visibility=vis, score=float(sc["score"]), part_template_id=int(s.slot_uid), part_template_posterior=template_posterior, assignment_posterior=assignment_posterior, subpart_assignments=[] if t.subpart_id is None else [int(t.subpart_id)], subpart_labels=subpart_labels, subpart_assignment_scores=subpart_scores, port_assignments=[(p.port_type, p.port_id) for p in t.ports], port_assignment_scores=[float(p.confidence) for p in t.ports]))
                 hyps.append(ParseHypothesisV7(hypothesis_id=len(hyps), root_node_id=0, score=float(st["score"] + self.relation_weight * rel_score), class_id=int(cid), pose_template_id=0, slots=slot_assignments, terminal_ids=tuple(int(x) for x in st["term_ids"]), relation_scores=relation_scores))
         hyps.sort(key=lambda h: h.score, reverse=True)
         return ParseForestV7(hypotheses=hyps[: int(self.top_k)]).normalize_posteriors()
@@ -393,11 +641,14 @@ class NativeMultiSlotParserV7:
             sb, tb = matched[r.target_slot_uid]
             if ta is None or tb is None:
                 continue
-            obs = box_relation_vector(ta.visible_box_xyxy, tb.visible_box_xyxy)
+            obs = box_relation_vector(terminal_evidence_box(ta), terminal_evidence_box(tb))
             mu = torch.tensor(r.mean, dtype=torch.float32)
             var = torch.tensor(r.var, dtype=torch.float32).clamp_min(1e-3)
             sim = float(torch.exp(-0.5 * torch.clamp((((obs - mu) ** 2) / var).mean(), max=4.0)).item()) if mu.numel() == obs.numel() else 0.0
-            out.append({"class_id": int(cid), "source_slot_uid": int(r.source_slot_uid), "target_slot_uid": int(r.target_slot_uid), "source_terminal": int(ta.terminal_id), "target_terminal": int(tb.terminal_id), "source_part": int(sa.part_id), "target_part": int(sb.part_id), "support": int(r.support), "reliability": float(r.reliability), "relation_similarity": sim, "total_score": float(r.reliability) * sim})
+            learned_ports = any(port.heatmap is not None for port in ta.ports) and any(port.heatmap is not None for port in tb.ports)
+            port = best_port_match(ta, tb) if learned_ports else {"source_port": None, "target_port": None, "score": 0.0}
+            port_score = float(r.reliability) * float(port.get("score", 0.0))
+            out.append({"class_id": int(cid), "source_slot_uid": int(r.source_slot_uid), "target_slot_uid": int(r.target_slot_uid), "source_terminal": int(ta.terminal_id), "target_terminal": int(tb.terminal_id), "source_part": int(sa.part_id), "target_part": int(sb.part_id), "support": int(r.support), "reliability": float(r.reliability), "relation_similarity": sim, "port_source_type": port.get("source_port"), "port_target_type": port.get("target_port"), "port_match_score": port_score, "learned_ports": bool(learned_ports), "total_score": float(r.reliability) * sim + float(self.cfg.port_weight) * port_score})
         return out
 
 
@@ -411,6 +662,10 @@ def build_native_grammar_from_multislot_bank(bank: MultiSlotBankV7, *, allow_abs
     same part id but different slot_uid / slot_id.
     """
     g = NativeGrammarV7(root_id=0, class_names=bank.class_names, part_names=bank.part_names)
+    g.shared_vocabulary = {
+        int(prototype.vocabulary_id): asdict(prototype)
+        for prototype in bank.shared_part_prototypes
+    }
     root = g.add_node(NodeKindV7.OR, "scene", "root_scene")
     g.root_id = root
     slot_node: dict[int, int] = {}
@@ -424,7 +679,7 @@ def build_native_grammar_from_multislot_bank(bank: MultiSlotBankV7, *, allow_abs
         for s in sorted(slots, key=lambda x: (x.part_id, x.slot_id, x.slot_uid)):
             slot_or = g.add_node(NodeKindV7.OR, "functional_slot", f"{cname}:{s.part_name}:slot_{s.slot_id}", attributes=asdict(s), complexity_cost=0.01)
             templ = g.add_node(NodeKindV7.AND, "slot_template", f"{cname}:{s.part_name}:slot_{s.slot_id}:template", attributes=asdict(s), complexity_cost=0.015)
-            term = g.add_node(NodeKindV7.TERMINAL, "slot_terminal", f"terminal:{cname}:{s.part_name}:slot_{s.slot_id}", attributes={"functional_part_id": int(s.part_id), "slot_id": int(slot_or), "slot_uid": int(s.slot_uid), "part_template_id": int(s.slot_uid), "subpart_id": int(s.slot_id), "template_geom_mean": list(s.geom_mean), "template_geom_var": list(s.geom_var), "requiredness": float(s.requiredness), "allow_absent": False}, complexity_cost=0.0)
+            term = g.add_node(NodeKindV7.TERMINAL, "slot_terminal", f"terminal:{cname}:{s.part_name}:slot_{s.slot_id}", attributes={"functional_part_id": int(s.part_id), "slot_id": int(slot_or), "slot_uid": int(s.slot_uid), "part_template_id": int(s.slot_uid), "subpart_id": int(s.slot_id), "shared_vocabulary_id": s.shared_vocabulary_id, "semantic_subparts": list(s.semantic_subparts), "template_geom_mean": list(s.geom_mean), "template_geom_var": list(s.geom_var), "requiredness": float(s.requiredness), "allow_absent": False}, complexity_cost=0.0)
             g.add_rule(slot_or, [templ], kind=RuleKindV7.OR_SELECT, branch_prior=max(1e-3, float(s.rate)), complexity_cost=0.01)
             g.add_rule(templ, [term], kind=RuleKindV7.AND_COMPOSE)
             if allow_absent:
@@ -437,7 +692,55 @@ def build_native_grammar_from_multislot_bank(bank: MultiSlotBankV7, *, allow_abs
             if r.source_slot_uid not in slot_node or r.target_slot_uid not in slot_node:
                 continue
             rel_ids.append(g.add_relation(slot_node[r.source_slot_uid], slot_node[r.target_slot_uid], "slot_relation", mean=tuple(r.mean), var=tuple(r.var), weight=1.0, source_part_id=int(r.source_part_id), target_part_id=int(r.target_part_id), support=int(r.support), reliability=float(r.reliability)))
-        g.add_rule(pose_node, children, kind=RuleKindV7.AND_COMPOSE, relation_factors=rel_ids, complexity_cost=0.02)
+        # Materialize accepted pursuit blocks as real reusable AND nodes.  Select a
+        # non-overlapping cover so a slot is not counted both directly and through
+        # a motif.  Unselected/overlapping blocks remain diagnostic metadata only.
+        motif_children: list[int] = []
+        covered_slots: set[int] = set()
+        pursued = [
+            block
+            for block in bank.cfg.get("pursued_blocks", [])
+            if int(block.get("class_id", -1)) == int(cid)
+        ]
+        pursued.sort(
+            key=lambda block: float(block.get("gain", 0.0)) - float(block.get("penalty", 0.0)),
+            reverse=True,
+        )
+        for block in pursued:
+            block_slots = [
+                int(uid)
+                for uid in block.get("slot_uids", [])
+                if int(uid) in slot_node
+            ]
+            if len(block_slots) < 2 or covered_slots.intersection(block_slots):
+                continue
+            motif = g.add_node(
+                NodeKindV7.AND,
+                "pursued_motif",
+                f"{cname}:motif_{int(block.get('block_id', len(motif_children)))}",
+                attributes={
+                    "class_id": int(cid),
+                    "slot_uids": block_slots,
+                    "support": int(block.get("support", 0)),
+                    "gain": float(block.get("gain", 0.0)),
+                    "penalty": float(block.get("penalty", 0.0)),
+                },
+                complexity_cost=max(0.0, float(block.get("penalty", 0.0))),
+            )
+            g.add_rule(
+                motif,
+                [slot_node[uid] for uid in block_slots],
+                kind=RuleKindV7.AND_COMPOSE,
+                complexity_cost=max(0.0, float(block.get("penalty", 0.0))),
+            )
+            motif_children.append(motif)
+            covered_slots.update(block_slots)
+        pose_children = motif_children + [
+            slot_node[int(slot.slot_uid)]
+            for slot in sorted(slots, key=lambda value: (value.part_id, value.slot_id, value.slot_uid))
+            if int(slot.slot_uid) not in covered_slots
+        ]
+        g.add_rule(pose_node, pose_children, kind=RuleKindV7.AND_COMPOSE, relation_factors=rel_ids, complexity_cost=0.02)
     g.validate()
     return g
 

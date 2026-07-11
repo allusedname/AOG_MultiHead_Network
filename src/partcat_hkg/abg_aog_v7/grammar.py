@@ -17,6 +17,7 @@ class NativeGrammarV7:
         self.relations: dict[int, RelationFactorV7] = {}
         self.class_names = list(class_names or [])
         self.part_names = list(part_names or [])
+        self.shared_vocabulary: dict[int, dict[str, Any]] = {}
         self._next_node = 0
         self._next_rule = 0
         self._next_relation = 0
@@ -58,11 +59,15 @@ class NativeGrammarV7:
                     raise ValueError(f"rule {rule.rule_id} has missing child {child}")
 
     def to_payload(self) -> dict[str, Any]:
-        return {"kind": "native_abg_hkg_aog_v7_grammar", "root_id": self.root_id, "class_names": list(self.class_names), "part_names": list(self.part_names), "nodes": {int(k): v.to_dict() for k, v in self.nodes.items()}, "rules": {int(k): v.to_dict() for k, v in self.rules.items()}, "relations": {int(k): v.to_dict() for k, v in self.relations.items()}, "next": {"node": self._next_node, "rule": self._next_rule, "relation": self._next_relation}}
+        return {"kind": "native_abg_hkg_aog_v7_grammar", "root_id": self.root_id, "class_names": list(self.class_names), "part_names": list(self.part_names), "shared_vocabulary": {int(k): dict(v) for k, v in self.shared_vocabulary.items()}, "nodes": {int(k): v.to_dict() for k, v in self.nodes.items()}, "rules": {int(k): v.to_dict() for k, v in self.rules.items()}, "relations": {int(k): v.to_dict() for k, v in self.relations.items()}, "next": {"node": self._next_node, "rule": self._next_rule, "relation": self._next_relation}}
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "NativeGrammarV7":
         g = cls(root_id=int(payload.get("root_id", 0)), class_names=list(payload.get("class_names", [])), part_names=list(payload.get("part_names", [])))
+        g.shared_vocabulary = {
+            int(key): dict(value)
+            for key, value in payload.get("shared_vocabulary", {}).items()
+        }
         for key, nd in payload.get("nodes", {}).items():
             g.nodes[int(key)] = GrammarNodeV7(node_id=int(nd["node_id"]), kind=NodeKindV7(nd["kind"]), semantic_type=str(nd["semantic_type"]), name=str(nd["name"]), children=list(nd.get("children", [])), rules=list(nd.get("rules", [])), attributes=dict(nd.get("attributes", {})), priors=dict(nd.get("priors", {})), complexity_cost=float(nd.get("complexity_cost", 0.0)))
         for key, rd in payload.get("rules", {}).items():

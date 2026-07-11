@@ -101,7 +101,19 @@ class NativeChartParserV7:
 
     @staticmethod
     def _copy_slot(s: SlotAssignmentV7) -> SlotAssignmentV7:
-        return SlotAssignmentV7(slot_id=s.slot_id, part_id=s.part_id, terminal_id=s.terminal_id, visibility=s.visibility, score=s.score, part_template_id=s.part_template_id, part_template_posterior=s.part_template_posterior, subpart_assignments=list(s.subpart_assignments), port_assignments=list(s.port_assignments))
+        return SlotAssignmentV7(
+            slot_id=s.slot_id,
+            part_id=s.part_id,
+            terminal_id=s.terminal_id,
+            visibility=s.visibility,
+            score=s.score,
+            part_template_id=s.part_template_id,
+            part_template_posterior=s.part_template_posterior,
+            assignment_posterior=s.assignment_posterior,
+            subpart_assignments=list(s.subpart_assignments),
+            port_assignments=list(s.port_assignments),
+            port_assignment_scores=list(s.port_assignment_scores),
+        )
 
     @staticmethod
     def _box_geom(box: tuple[float, float, float, float]) -> torch.Tensor:
@@ -141,7 +153,18 @@ class NativeChartParserV7:
             elif t.subpart_id is not None:
                 subparts.append(int(t.subpart_id))
             bonus = self._template_geom_bonus(node, t)
-            slot = SlotAssignmentV7(slot_id=slot_id, part_id=int(t.functional_part_id), terminal_id=int(t.terminal_id), visibility=vis, score=float(t.visible_score) + bonus, part_template_id=int(part_template_id) if part_template_id is not None else None, part_template_posterior=None, subpart_assignments=subparts, port_assignments=[(p.port_type, p.port_id) for p in t.ports])
+            slot = SlotAssignmentV7(
+                slot_id=slot_id,
+                part_id=int(t.functional_part_id),
+                terminal_id=int(t.terminal_id),
+                visibility=vis,
+                score=float(t.visible_score) + bonus,
+                part_template_id=int(part_template_id) if part_template_id is not None else None,
+                part_template_posterior=None,
+                subpart_assignments=subparts,
+                port_assignments=[(p.port_type, p.port_id) for p in t.ports],
+                port_assignment_scores=[float(p.confidence) for p in t.ports],
+            )
             states.append(_State(score=float(t.visible_score) + bonus - float(t.uncertainty), terminal_ids=(int(t.terminal_id),), slots=[slot]))
         if allow_absent or not states:
             target_part = int(part_id) if part_id is not None else -1

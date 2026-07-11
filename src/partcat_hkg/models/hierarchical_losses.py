@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from partcat_hkg.data.schema import RoleSchema
-from partcat_hkg.models.losses import dice_loss, stage1_loss
+from partcat_hkg.models.losses import soft_dice_loss, stage1_loss
 
 
 @dataclass
@@ -87,7 +87,7 @@ def hierarchical_stage1_loss(
     sub_logits = out["subpart_logits"]
     sub_prob = torch.sigmoid(sub_logits)
     sub_bce = F.binary_cross_entropy_with_logits(sub_logits, target_sub)
-    sub_dice = dice_loss(sub_logits, target_sub)
+    sub_dice = soft_dice_loss(sub_logits, target_sub)
 
     parent_idx = out.get("subpart_to_part")
     if not torch.is_tensor(parent_idx):
@@ -101,7 +101,10 @@ def hierarchical_stage1_loss(
     # not force hallucination.
     bsz, num_parts, height, width = target_part_local.shape
     sub_as_parent = sub_prob.view(bsz, num_parts, subparts_per_part, height, width).amax(2)
-    cover_loss = dice_loss(torch.logit(sub_as_parent.clamp(1e-4, 1 - 1e-4)), target_part_local)
+    cover_loss = soft_dice_loss(
+        torch.logit(sub_as_parent.clamp(1e-4, 1 - 1e-4)),
+        target_part_local,
+    )
 
     bottom = out.get("part_logits_bottomup")
     consistency = torch.zeros((), device=sub_logits.device)

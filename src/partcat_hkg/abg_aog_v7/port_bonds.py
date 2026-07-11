@@ -18,6 +18,27 @@ class PortOntologyV7:
         # with semantic names such as hub/root/tip/contact/attach.
         return cls({-1: ("center", "left", "right", "top", "bottom")})
 
+    @classmethod
+    def from_part_names(cls, part_names: list[str]) -> "PortOntologyV7":
+        mapping: dict[int, tuple[str, ...]] = {}
+        for part_id, raw_name in enumerate(part_names):
+            name = str(raw_name).lower()
+            if any(word in name for word in ("wheel", "tire")):
+                names = ("hub", "rim", "contact", "attach")
+            elif any(word in name for word in ("wing", "fin")):
+                names = ("root", "tip", "attach", "boundary")
+            elif any(word in name for word in ("leg", "foot", "paw", "hand", "arm")):
+                names = ("root", "center", "tip", "contact")
+            elif any(word in name for word in ("tail", "neck")):
+                names = ("root", "center", "tip", "attach")
+            elif any(word in name for word in ("head", "beak", "snout")):
+                names = ("center", "boundary", "attach")
+            else:
+                names = ("center", "left", "right", "top", "bottom", "attach")
+            mapping[int(part_id)] = names
+        mapping[-1] = cls.default().ports_by_part[-1]
+        return cls(mapping)
+
     def names_for_part(self, part_id: int) -> tuple[str, ...]:
         return self.ports_by_part.get(int(part_id), self.ports_by_part.get(-1, ("center",)))
 
@@ -45,11 +66,19 @@ def geometry_ports(box: tuple[float, float, float, float], *, terminal_id: int, 
     return out
 
 
-def ensure_ports(terminals: Iterable[TerminalPacketV7], ontology: PortOntologyV7 | None = None) -> list[TerminalPacketV7]:
+def ensure_ports(
+    terminals: Iterable[TerminalPacketV7],
+    ontology: PortOntologyV7 | None = None,
+    *,
+    replace_geometry_fallback: bool = False,
+) -> list[TerminalPacketV7]:
     ontology = ontology or PortOntologyV7.default()
     out: list[TerminalPacketV7] = []
     for t in terminals:
-        if not t.ports:
+        if not t.ports or (
+            replace_geometry_fallback
+            and all(port.heatmap is None for port in t.ports)
+        ):
             t.ports = geometry_ports(t.visible_box_xyxy, terminal_id=t.terminal_id, part_id=t.functional_part_id, ontology=ontology)
         out.append(t)
     return out

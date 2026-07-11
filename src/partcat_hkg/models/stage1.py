@@ -205,7 +205,14 @@ class PartCATHKGStage1(nn.Module):
             pretrained=cfg.use_imagenet_backbone_pretrain,
             freeze=cfg.freeze_backbone,
         )
-        self.dino = OptionalDINOFeatureMap(cfg.use_dino, cfg.dino_model_name, cfg.dino_weights, input_size=cfg.dino_input_size, freeze=cfg.freeze_dino)
+        self.dino = OptionalDINOFeatureMap(
+            cfg.use_dino,
+            cfg.dino_model_name,
+            cfg.dino_weights,
+            input_size=cfg.dino_input_size,
+            freeze=cfg.freeze_dino,
+            pretrained=bool(getattr(cfg, "dino_pretrained_init", True)),
+        )
         dino_ch = max(1, int(self.dino.out_ch or 1))
         self.text_bank = TextPrototypeBank(
             schema.obj_names,

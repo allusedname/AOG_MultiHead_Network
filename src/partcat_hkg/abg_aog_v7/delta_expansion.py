@@ -28,11 +28,12 @@ class SemiSupervisedGrammarExpanderV7:
         part_name = name or f'part_{part_id}'
         attached = 0
         for node in list(grammar.nodes.values()):
-            if node.semantic_type != 'functional_part' or int(node.attributes.get('functional_part_id', -1)) != int(part_id):
+            node_part_id = node.attributes.get('functional_part_id', node.attributes.get('part_id', -1))
+            if node.semantic_type not in {'functional_part', 'functional_slot'} or int(node_part_id) != int(part_id):
                 continue
-            template_id = 10000 + int(support) + attached
+            template_id = 10000 + int(grammar._next_node) + attached
             templ = grammar.add_node(NodeKindV7.AND, 'part_template', f'semisup:{part_name}:{template_id}', attributes={'functional_part_id': int(part_id), 'part_template_id': int(template_id), 'support': int(support), 'gain': float(gain), 'consistency': float(consistency)}, complexity_cost=0.02)
-            term = grammar.add_node(NodeKindV7.TERMINAL, 'terminal_evidence', f'terminal:{part_name}:semisup:{template_id}', attributes={'functional_part_id': int(part_id), 'part_template_id': int(template_id), 'slot_id': int(node.node_id)}, complexity_cost=0.0)
+            term = grammar.add_node(NodeKindV7.TERMINAL, 'terminal_evidence', f'terminal:{part_name}:semisup:{template_id}', attributes={'functional_part_id': int(part_id), 'part_template_id': int(template_id), 'slot_id': int(node.node_id), 'slot_uid': int(node.attributes.get('slot_uid', node.node_id)), 'allow_absent': False}, complexity_cost=0.0)
             grammar.add_rule(node.node_id, [templ], kind=RuleKindV7.OR_SELECT, branch_prior=max(1e-3, float(consistency)), complexity_cost=0.02)
             grammar.add_rule(templ, [term], kind=RuleKindV7.AND_COMPOSE, branch_prior=1.0, complexity_cost=0.0)
             attached += 1
