@@ -17,17 +17,17 @@ if str(SRC) not in sys.path:
 from partcat_hkg.abg_aog_v7.multislot_native import record_label
 from partcat_hkg.strict_aog.terminals import load_terminal_cache
 from partcat_hkg.open_vocab_abg.cache_adapter import known_object_queries_v7, open_vocab_terminals_from_record_v7
-from partcat_hkg.open_vocab_abg.calibrator import CalibratorTrainConfigV7, OpenVocabCalibratorV7
-from partcat_hkg.open_vocab_abg.compiler import DynamicGrammarCompilerV7, NeuralGrammarPriorV7
+from partcat_hkg.open_vocab_abg.calibrator import CalibratorTrainConfigV7, OPEN_VOCAB_FEATURES_V7, OpenVocabCalibratorV7
 from partcat_hkg.open_vocab_abg.parser import OpenVocabularyAOGParserV7
+from partcat_hkg.open_vocab_abg.slotwise import SlotwiseDynamicGrammarCompilerV7, SlotwiseNeuralGrammarPriorV7, SlotwiseOpenVocabStage2TrainerV7
 from partcat_hkg.open_vocab_abg.text_encoder import DynamicTextQueryEncoderV7
-from partcat_hkg.open_vocab_abg.trainer import OpenVocabStage2TrainerV7, Stage2TrainerConfigV7
+from partcat_hkg.open_vocab_abg.trainer import Stage2TrainerConfigV7
 from partcat_hkg.open_vocab_abg.types import OpenVocabStage2ConfigV7
 from partcat_hkg.open_vocab_abg.universal_bank import UniversalStructuralBankV7
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train neural grammar priors and the shared monotonic open-vocabulary calibrator")
+    parser = argparse.ArgumentParser(description="Train slotwise neural grammar priors and the shared monotonic open-vocabulary calibrator")
     parser.add_argument("--structural-bank", required=True)
     parser.add_argument("--train-cache", required=True)
     parser.add_argument("--out-dir", required=True)
@@ -48,9 +48,9 @@ def main() -> None:
     bank = UniversalStructuralBankV7.load(args.structural_bank, map_location="cpu")
     text_encoder = DynamicTextQueryEncoderV7(require_semantic=not bool(args.allow_fallback_text))
     stage2_cfg = OpenVocabStage2ConfigV7(parser_final_top_k=max(8, int(args.candidates_per_image)))
-    neural_prior = NeuralGrammarPriorV7(bank.text_dim, max_multiplicity=int(bank.config.get("max_multiplicity", 6)))
-    compiler = DynamicGrammarCompilerV7(bank, text_encoder, cfg=stage2_cfg, neural_prior=neural_prior)
-    trainer = OpenVocabStage2TrainerV7(
+    neural_prior = SlotwiseNeuralGrammarPriorV7(bank.text_dim, max_multiplicity=int(bank.config.get("max_multiplicity", 6)))
+    compiler = SlotwiseDynamicGrammarCompilerV7(bank, text_encoder, cfg=stage2_cfg, neural_prior=neural_prior)
+    trainer = SlotwiseOpenVocabStage2TrainerV7(
         bank,
         compiler,
         neural_prior,
@@ -63,7 +63,7 @@ def main() -> None:
         metrics["epoch"] = epoch
         neural_logs.append(metrics)
     torch.save({
-        "kind": "open_vocab_neural_grammar_prior_v7",
+        "kind": "open_vocab_slotwise_neural_grammar_prior_v7",
         "text_dim": bank.text_dim,
         "max_multiplicity": int(bank.config.get("max_multiplicity", 6)),
         "state_dict": neural_prior.state_dict(),
@@ -98,7 +98,7 @@ def main() -> None:
             grammar = compiler.compile(query, terminals=terminals, exclude_class_ids={label} if pseudo_unseen else None)
             hypotheses = base_parser._parse_grammar(grammar, terminals)
             feature_dict = hypotheses[0].score_features if hypotheses else {}
-            features_for_sample.append([float(feature_dict.get(name, 0.0)) for name in OpenVocabCalibratorV7(bank.text_dim).feature_names])
+            features_for_sample.append([float(feature_dict.get(name, 0.0)) for name in OPEN_VOCAB_FEATURES_V7])
             embeddings_for_sample.append([float(x) for x in query.embedding.tolist()])
         feature_rows.append(features_for_sample)
         embedding_rows.append(embeddings_for_sample)
