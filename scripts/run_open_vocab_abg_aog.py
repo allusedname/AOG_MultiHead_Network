@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import fields
 from pathlib import Path
 import sys
 
@@ -17,6 +18,7 @@ if str(SRC) not in sys.path:
 
 from partcat_hkg.open_vocab_abg.abg import OpenVocabularyABGEngineV7
 from partcat_hkg.open_vocab_abg.calibrator import OpenVocabCalibratorV7
+from partcat_hkg.open_vocab_abg.checkpoint import load_open_vocab_stage1_checkpoint_v7
 from partcat_hkg.open_vocab_abg.compiler import stable_query_id
 from partcat_hkg.open_vocab_abg.materialize import materialize_dynamic_grammars_v7
 from partcat_hkg.open_vocab_abg.parser import OpenVocabularyAOGParserV7
@@ -52,10 +54,29 @@ def _load_image(path: str, size: int, normalize: bool) -> torch.Tensor:
     return tensor
 
 
-def _load_module_state(module: torch.nn.Module, path: str) -> None:
+def _load_module_state(module: torch.nn.Module, path: str) -> dict:
     payload = torch.load(path, map_location="cpu")
     state = payload.get("model", payload.get("state_dict", payload)) if isinstance(payload, dict) else payload
     module.load_state_dict(state, strict=False)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _stage1_config(args, checkpoint_payload: dict) -> OpenVocabStage1ConfigV7:
+    allowed = {field.name for field in fields(OpenVocabStage1ConfigV7)}
+    raw = {key: value for key, value in checkpoint_payload.get("config", {}).items() if key in allowed}
+    cfg = OpenVocabStage1ConfigV7(**raw)
+    if args.backbone:
+        cfg.backbone_name = args.backbone
+    if args.backbone_pretrained:
+        cfg.backbone_pretrained = True
+    if args.disable_dino:
+        cfg.use_dino = False
+    if args.dino_model:
+        cfg.dino_model_name = args.dino_model
+    if args.dino_weights:
+        cfg.dino_weights = args.dino_weights
+    cfg.require_semantic_text = not bool(args.allow_fallback_text)
+    return cfg
 
 
 def main() -> None:
@@ -69,11 +90,16 @@ def main() -> None:
     parser.add_argument("--neural-prior-checkpoint", default="")
     parser.add_argument("--calibrator-checkpoint", default="")
     parser.add_argument("--allow-random-stage1", action="store_true")
+    parser.add_argument("--allow-unvalidated-stage1", action="store_true")
     parser.add_argument("--allow-fallback-text", action="store_true")
-    parser.add_argument("--backbone", default="resnet18")
+    parser.add_argument("--require-instance-head", action="store_true")
+    parser.add_argument("--require-amodal-head", action="store_true")
+    parser.add_argument("--require-port-head", action="store_true")
+    parser.add_argument("--require-token-head", action="store_true")
+    parser.add_argument("--backbone", default="", help="Optional checkpoint override; ResNet or compatible timm model")
     parser.add_argument("--backbone-pretrained", action="store_true")
     parser.add_argument("--disable-dino", action="store_true")
-    parser.add_argument("--dino-model", default="vit_small_patch16_224.dino")
+    parser.add_argument("--dino-model", default="")
     parser.add_argument("--dino-weights", default="")
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--imagenet-normalize", action="store_true")
@@ -89,17 +115,20 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     bank = UniversalStructuralBankV7.load(args.structural_bank, map_location="cpu")
     text_encoder = DynamicTextQueryEncoderV7(require_semantic=not bool(args.allow_fallback_text))
-    stage1_cfg = OpenVocabStage1ConfigV7(
-        backbone_name=args.backbone,
-        backbone_pretrained=bool(args.backbone_pretrained),
-        use_dino=not bool(args.disable_dino),
-        dino_model_name=args.dino_model,
-        dino_weights=args.dino_weights,
-        require_semantic_text=not bool(args.allow_fallback_text),
-    )
+    checkpoint_payload = torch.load(args.stage1_checkpoint, map_location="cpu") if args.stage1_checkpoint else {}
+    stage1_cfg = _stage1_config(args, checkpoint_payload if isinstance(checkpoint_payload, dict) else {})
     stage1 = OpenVocabularyStage1V7(stage1_cfg, text_encoder=text_encoder)
+    checkpoint_contract = None
     if args.stage1_checkpoint:
-        _load_module_state(stage1, args.stage1_checkpoint)
+        checkpoint_contract = load_open_vocab_stage1_checkpoint_v7(
+            stage1,
+            args.stage1_checkpoint,
+            allow_unvalidated=bool(args.allow_unvalidated_stage1),
+            require_instance=bool(args.require_instance_head),
+            require_amodal=bool(args.require_amodal_head),
+            require_ports=bool(args.require_port_head),
+            require_tokens=bool(args.require_token_head),
+        )
     stage1.eval()
 
     neural_prior = None
@@ -143,6 +172,7 @@ def main() -> None:
         "object_queries": object_texts,
         "part_queries": part_texts,
         "text_backend": text_encoder.status.__dict__,
+        "stage1_contract": None if checkpoint_contract is None else checkpoint_contract.to_dict(),
         "map_parse": None if result.forest.map_parse is None else result.forest.map_parse.to_dict(),
         "forest": [h.to_dict() for h in result.forest.hypotheses],
         "entropy": result.forest.entropy,
