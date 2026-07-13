@@ -17,17 +17,20 @@ if str(SRC) not in sys.path:
 
 from partcat_hkg.open_vocab_abg.abg import OpenVocabularyABGEngineV7
 from partcat_hkg.open_vocab_abg.calibrator import OpenVocabCalibratorV7
-from partcat_hkg.open_vocab_abg.compiler import DynamicGrammarCompilerV7, NeuralGrammarPriorV7, stable_query_id
+from partcat_hkg.open_vocab_abg.compiler import stable_query_id
 from partcat_hkg.open_vocab_abg.materialize import materialize_dynamic_grammars_v7
 from partcat_hkg.open_vocab_abg.parser import OpenVocabularyAOGParserV7
 from partcat_hkg.open_vocab_abg.scene import OpenVocabularySceneParserV7
+from partcat_hkg.open_vocab_abg.slotwise import SlotwiseDynamicGrammarCompilerV7, SlotwiseNeuralGrammarPriorV7
 from partcat_hkg.open_vocab_abg.stage1 import OpenVocabularyStage1V7
 from partcat_hkg.open_vocab_abg.text_encoder import DynamicTextQueryEncoderV7
 from partcat_hkg.open_vocab_abg.types import (
     OpenVocabABGConfigV7,
     OpenVocabObjectQueryV7,
+    OpenVocabQueryKindV7,
     OpenVocabStage1ConfigV7,
     OpenVocabStage2ConfigV7,
+    OpenVocabTextQueryV7,
 )
 from partcat_hkg.open_vocab_abg.universal_bank import UniversalStructuralBankV7
 
@@ -85,9 +88,7 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     bank = UniversalStructuralBankV7.load(args.structural_bank, map_location="cpu")
-    text_encoder = DynamicTextQueryEncoderV7(
-        require_semantic=not bool(args.allow_fallback_text),
-    )
+    text_encoder = DynamicTextQueryEncoderV7(require_semantic=not bool(args.allow_fallback_text))
     stage1_cfg = OpenVocabStage1ConfigV7(
         backbone_name=args.backbone,
         backbone_pretrained=bool(args.backbone_pretrained),
@@ -103,12 +104,12 @@ def main() -> None:
 
     neural_prior = None
     if args.neural_prior_checkpoint:
-        neural_prior = NeuralGrammarPriorV7(bank.text_dim, max_multiplicity=int(bank.config.get("max_multiplicity", 6)))
+        neural_prior = SlotwiseNeuralGrammarPriorV7(bank.text_dim, max_multiplicity=int(bank.config.get("max_multiplicity", 6)))
         _load_module_state(neural_prior, args.neural_prior_checkpoint)
         neural_prior.eval()
 
     stage2_cfg = OpenVocabStage2ConfigV7()
-    compiler = DynamicGrammarCompilerV7(bank, text_encoder, cfg=stage2_cfg, neural_prior=neural_prior)
+    compiler = SlotwiseDynamicGrammarCompilerV7(bank, text_encoder, cfg=stage2_cfg, neural_prior=neural_prior)
     calibrator = OpenVocabCalibratorV7.load(args.calibrator_checkpoint, map_location="cpu") if args.calibrator_checkpoint else None
     if calibrator is not None:
         calibrator.eval()
@@ -129,9 +130,7 @@ def main() -> None:
     object_specs = []
     for text in object_texts:
         qid = stable_query_id(f"object:{text}", namespace=1_000)
-        query = next((q for q in result.forest.hypotheses if int(q.object_query_id) == qid), None)
-        text_query = __import__("partcat_hkg.open_vocab_abg.types", fromlist=["OpenVocabTextQueryV7", "OpenVocabQueryKindV7"])
-        raw = text_query.OpenVocabTextQueryV7(qid, text, text_query.OpenVocabQueryKindV7.OBJECT)
+        raw = OpenVocabTextQueryV7(qid, text, OpenVocabQueryKindV7.OBJECT)
         embedding = text_encoder.encode_query(raw).detach().cpu()
         score = max((h.posterior for h in result.forest.hypotheses if int(h.object_query_id) == qid), default=0.0)
         object_specs.append(OpenVocabObjectQueryV7(qid, text, embedding, stage1_object_score=float(score)))
