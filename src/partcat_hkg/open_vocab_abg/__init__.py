@@ -11,6 +11,12 @@ from .universal_bank import (
 )
 from .retrieval import GrammarRetrieverV7, RetrievedGrammarV7
 from .compiler import DynamicGrammarCompilerV7, NeuralGrammarPriorV7, stable_query_id
+from .slotwise import (
+    SlotwiseDynamicGrammarCompilerV7,
+    SlotwiseNeuralGrammarPriorV7,
+    SlotwiseOpenVocabStage2TrainerV7,
+    slotwise_grammar_distillation_loss_v7,
+)
 from .parser import OpenVocabularyAOGParserV7
 from .calibrator import (
     CalibratorTrainConfigV7,
