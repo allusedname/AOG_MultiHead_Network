@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 import torch.nn.functional as F
 
@@ -22,10 +20,25 @@ def region_text_contrastive_loss(region_tokens: torch.Tensor, text_targets: torc
         raise ValueError("region and text token dimensions must match for contrastive loss")
     region = F.normalize(region_tokens.float(), dim=-1)
     text = F.normalize(text_targets.float(), dim=-1)
-    logits = torch.einsum("bqd,qd->bqq", region, text) if False else torch.einsum("bqd,kd->bqk", region, text)
-    logits = logits / max(float(temperature), 1e-6)
+    logits = torch.einsum("bqd,kd->bqk", region, text) / max(float(temperature), 1e-6)
     targets = torch.arange(region.shape[1], device=region.device).unsqueeze(0).expand(region.shape[0], -1)
     return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
+
+
+def _resize_query_maps(target: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+    if target.ndim != 4:
+        raise ValueError("query mask target must be [B,Q,H,W]")
+    batch, queries = target.shape[:2]
+    resized = F.interpolate(target.reshape(batch * queries, 1, *target.shape[-2:]).float(), size=size, mode="nearest")
+    return resized.reshape(batch, queries, *size)
+
+
+def _resize_port_maps(target: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+    if target.ndim != 5:
+        raise ValueError("port target must be [B,Q,P,H,W]")
+    batch, queries, ports = target.shape[:3]
+    resized = F.interpolate(target.reshape(batch * queries, ports, *target.shape[-2:]).float(), size=size, mode="bilinear", align_corners=False)
+    return resized.reshape(batch, queries, ports, *size)
 
 
 def open_vocab_stage1_loss_v7(
@@ -34,16 +47,23 @@ def open_vocab_stage1_loss_v7(
     *,
     weights: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Loss for dynamic query masks and class-agnostic instance evidence.
+    """Loss for dynamic visible/amodal masks and class-agnostic instances.
 
-    Expected targets may include query_masks [B,Q,H,W], query_presence [B,Q],
-    support_mask, boundary_mask, instance_center, instance_offsets, offset_valid,
-    uncertainty_target, and token_targets [Q,D] or [B,Q,D].
+    Expected targets may include:
+      query_masks [B,Q,H,W], query_presence [B,Q],
+      amodal_masks [B,Q,H,W], amodal_presence [B,Q],
+      port_heatmaps [B,Q,P,H,W],
+      support_mask, boundary_mask, instance_center, instance_offsets,
+      offset_valid, uncertainty_target, and token_targets [Q,D] or [B,Q,D].
     """
     w = {
         "mask_bce": 1.0,
         "mask_dice": 1.0,
         "presence": 1.0,
+        "amodal_bce": 0.5,
+        "amodal_dice": 0.5,
+        "amodal_presence": 0.5,
+        "ports": 0.20,
         "support": 0.5,
         "boundary": 0.25,
         "center": 0.5,
@@ -54,11 +74,20 @@ def open_vocab_stage1_loss_v7(
     w.update(weights or {})
     losses: dict[str, torch.Tensor] = {}
     if "query_masks" in targets:
-        mask_target = F.interpolate(targets["query_masks"].float(), size=output.query_logits.shape[-2:], mode="nearest")
+        mask_target = _resize_query_maps(targets["query_masks"], tuple(output.query_logits.shape[-2:]))
         losses["mask_bce"] = F.binary_cross_entropy_with_logits(output.query_logits, mask_target)
         losses["mask_dice"] = dice_loss(output.query_logits, mask_target)
     if "query_presence" in targets:
         losses["presence"] = F.binary_cross_entropy(output.presence, targets["query_presence"].float())
+    if "amodal_masks" in targets and getattr(output, "amodal_logits", None) is not None:
+        amodal_target = _resize_query_maps(targets["amodal_masks"], tuple(output.amodal_logits.shape[-2:]))
+        losses["amodal_bce"] = F.binary_cross_entropy_with_logits(output.amodal_logits, amodal_target)
+        losses["amodal_dice"] = dice_loss(output.amodal_logits, amodal_target)
+    if "amodal_presence" in targets and getattr(output, "amodal_presence", None) is not None:
+        losses["amodal_presence"] = F.binary_cross_entropy(output.amodal_presence, targets["amodal_presence"].float())
+    if "port_heatmaps" in targets and getattr(output, "port_heatmaps", None) is not None:
+        port_target = _resize_port_maps(targets["port_heatmaps"], tuple(output.port_heatmaps.shape[-2:]))
+        losses["ports"] = F.mse_loss(torch.sigmoid(output.port_heatmaps), port_target)
     if "support_mask" in targets:
         support = F.interpolate(targets["support_mask"].float(), size=output.support_logits.shape[-2:], mode="nearest")
         losses["support"] = F.binary_cross_entropy_with_logits(output.support_logits, support)
@@ -75,7 +104,7 @@ def open_vocab_stage1_loss_v7(
             valid = torch.ones_like(offsets[:, :1])
         else:
             valid = F.interpolate(valid.float(), size=output.instance_offsets.shape[-2:], mode="nearest")
-        losses["offset"] = (F.smooth_l1_loss(output.instance_offsets, offsets, reduction="none") * valid).sum() / valid.sum().clamp_min(1.0)
+        losses["offset"] = (F.smooth_l1_loss(output.instance_offsets, offsets, reduction="none") * valid).sum() / (valid.sum().clamp_min(1.0) * output.instance_offsets.shape[1])
     if "uncertainty_target" in targets:
         losses["uncertainty"] = F.binary_cross_entropy(output.uncertainty, targets["uncertainty_target"].float())
     if "token_targets" in targets:
@@ -149,13 +178,7 @@ def object_parse_js_loss_v7(stage1_object_prob: torch.Tensor, stage2_object_prob
     return 0.5 * (F.kl_div(m.log(), p, reduction="batchmean") + F.kl_div(m.log(), q, reduction="batchmean"))
 
 
-def slot_presence_consistency_loss_v7(
-    stage1_presence: torch.Tensor,
-    stage2_slot_posterior: torch.Tensor,
-    visibility_mask: torch.Tensor,
-    *,
-    detach_stage2: bool = True,
-) -> torch.Tensor:
+def slot_presence_consistency_loss_v7(stage1_presence: torch.Tensor, stage2_slot_posterior: torch.Tensor, visibility_mask: torch.Tensor, *, detach_stage2: bool = True) -> torch.Tensor:
     target = stage2_slot_posterior.detach() if detach_stage2 else stage2_slot_posterior
     loss = F.binary_cross_entropy(stage1_presence.float(), target.float(), reduction="none")
     return (loss * visibility_mask.float()).sum() / visibility_mask.float().sum().clamp_min(1.0)
