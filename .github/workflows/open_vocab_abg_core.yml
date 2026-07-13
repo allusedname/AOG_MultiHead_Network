@@ -1,0 +1,44 @@
+name: open-vocab-abg-core
+
+on:
+  push:
+    branches:
+      - codex/open-vocab-abg-aog-full
+  pull_request:
+    paths:
+      - 'src/partcat_hkg/open_vocab_abg/**'
+      - 'scripts/*open_vocab*'
+      - 'tests/test_open_vocab*'
+      - 'pyproject.toml'
+      - '.github/workflows/open_vocab_abg_core.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Compile open-vocabulary package and scripts
+        run: |
+          python -m compileall -q src/partcat_hkg/open_vocab_abg
+          python -m compileall -q scripts
+      - name: Run open-vocabulary tests
+        run: |
+          pytest -q \
+            tests/test_open_vocab_stage1.py \
+            tests/test_open_vocab_stage2.py \
+            tests/test_open_vocab_abg.py \
+            tests/test_open_vocab_full_generator.py \
+            tests/test_open_vocab_checkpoint.py \
+            tests/test_open_vocab_scene.py
